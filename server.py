@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Unified XBWorld server — a single FastAPI process serving everything.
+XBWorld Game Server — freeciv engine + WebSocket proxy.
 
 Serves:
-- Static web client files
+- Game server process management (freeciv-server)
+- In-process WebSocket proxy (ws_proxy.py)
 - Game launcher API
 - Metaserver status API
-- AI agent management API
-- In-process WebSocket proxy (ws_proxy.py)
-- Game server process management
+- Static web client files (optional)
 
 Usage:
     python server.py                    # Start server on port 8080
     python server.py --port 8000        # Custom port
-    python server.py --agents 4         # Auto-start a 4-agent game
 """
 
 import argparse
@@ -24,22 +22,16 @@ import os
 import signal
 import socket
 import subprocess
-import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from config import (
-    LLM_MODEL, LLM_API_KEY, LLM_BASE_URL,
-)
-from game_client import GameClient
-from agent import XBWorldAgent, DEFAULT_SYSTEM_PROMPT
 from ws_proxy import handle_civsocket
 
 logger = logging.getLogger("xbworld-server")
@@ -48,23 +40,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 _webapp_env = os.getenv("WEBAPP_DIR", "")
 WEBAPP_DIR = Path(_webapp_env) if _webapp_env else Path("/nonexistent")  # Optional: set to serve frontend files
 
-STRATEGY_PROMPT_TEMPLATE = """You are an expert XBWorld player AI agent named "{name}". You control a civilization and make strategic decisions each turn.
-
-Your strategic personality: {strategy}
-
-Your capabilities:
-- Query game state (cities, units, research, messages)
-- Send server commands (e.g. /set tax 30, /start, /save)
-- Change city production, set research targets, adjust tax rates
-- Move units, found cities, fortify, explore, disband, sentry
-- End turns when done
-
-When no instructions are given, play autonomously following your strategic personality.
-Always be concise. Respond in the same language as the user."""
-
 
 # ---------------------------------------------------------------------------
-# Server Process Manager (replaces publite2)
+# Server Process Manager
 # ---------------------------------------------------------------------------
 class ServerManager:
     """Manages freeciv-server processes.
@@ -89,11 +67,7 @@ class ServerManager:
         raise RuntimeError(f"No free port in {start}-{end}")
 
     def spawn_game(self, game_type: str = "multiplayer") -> int:
-        """Spawn a freeciv-server. Returns server port.
-
-        No separate proxy process is needed — the WebSocket proxy runs
-        in-process via ws_proxy.py.
-        """
+        """Spawn a freeciv-server. Returns server port."""
         port = self._find_free_port()
         logger.info("Found free port %d for %s game", port, game_type)
 
@@ -210,99 +184,9 @@ event_bus = EventBus()
 
 
 # ---------------------------------------------------------------------------
-# Agent Orchestrator
-# ---------------------------------------------------------------------------
-class AgentOrchestrator:
-    def __init__(self, server_mgr: ServerManager):
-        self.server_mgr = server_mgr
-        self.agents: dict[str, XBWorldAgent] = {}
-        self.clients: dict[str, GameClient] = {}
-        self.server_port: int = -1
-        self._tasks: list[asyncio.Task] = []
-
-    async def create_game(self, agent_configs: list[dict], server_port: int = None,
-                          aifill: int = 0):
-        logger.info("Creating game with %d agents, server_port=%s, aifill=%d",
-                     len(agent_configs), server_port, aifill)
-        if self.agents:
-            logger.info("Shutting down existing game before creating new one")
-            await self.shutdown()
-
-        first_client = GameClient(username=agent_configs[0]["name"])
-
-        if server_port:
-            self.server_port = server_port
-            await first_client.join_game(server_port)
-        else:
-            port = self.server_mgr.spawn_game("multiplayer")
-            await asyncio.sleep(2)
-            self.server_port = port
-            await first_client.join_game(port)
-
-        self.clients[agent_configs[0]["name"]] = first_client
-        await asyncio.sleep(2)
-
-        if not first_client.state.connected:
-            raise ConnectionError("First agent failed to connect")
-
-        for cfg in agent_configs[1:]:
-            client = GameClient(username=cfg["name"])
-            await client.join_game(self.server_port)
-            self.clients[cfg["name"]] = client
-            await asyncio.sleep(1)
-
-        for cfg in agent_configs:
-            client = self.clients[cfg["name"]]
-            strategy = cfg.get("strategy", "balanced play")
-            llm_model = cfg.get("llm_model")
-            prompt = STRATEGY_PROMPT_TEMPLATE.format(name=cfg["name"], strategy=strategy)
-            agent = XBWorldAgent(client, name=cfg["name"],
-                                 system_prompt=prompt, llm_model=llm_model,
-                                 event_bus=event_bus)
-            self.agents[cfg["name"]] = agent
-
-        first_client = self.clients[agent_configs[0]["name"]]
-        total_players = len(agent_configs) + aifill
-        if aifill > 0:
-            await first_client.send_chat(f"/set aifill {total_players}")
-            await asyncio.sleep(0.5)
-        await first_client.send_chat("/set timeout 0")
-        await asyncio.sleep(0.5)
-
-        for name, client in self.clients.items():
-            await client.send_chat("/start")
-            await asyncio.sleep(0.3)
-
-        for i in range(15):
-            await asyncio.sleep(1)
-            if any(c.state.turn >= 1 for c in self.clients.values()):
-                break
-
-        for name, agent in self.agents.items():
-            task = asyncio.create_task(agent.run_game_loop())
-            self._tasks.append(task)
-            logger.info("Agent '%s' game loop started", name)
-
-    async def shutdown(self):
-        for task in self._tasks:
-            task.cancel()
-        self._tasks.clear()
-        for agent in self.agents.values():
-            await agent.close()
-        for client in self.clients.values():
-            await client.close()
-        self.clients.clear()
-        self.agents.clear()
-        if self.server_port > 0:
-            self.server_mgr.kill_game(self.server_port)
-        self.server_port = -1
-
-
-# ---------------------------------------------------------------------------
 # Global instances
 # ---------------------------------------------------------------------------
 server_mgr = ServerManager()
-orchestrator = AgentOrchestrator(server_mgr)
 
 
 # ---------------------------------------------------------------------------
@@ -311,13 +195,12 @@ orchestrator = AgentOrchestrator(server_mgr)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
-    await orchestrator.shutdown()
     server_mgr.kill_all()
 
 
-app = FastAPI(title="XBWorld Server", lifespan=lifespan)
+app = FastAPI(title="XBWorld Game Server", lifespan=lifespan)
 
-# --- CORS middleware (allow local frontend to connect to remote backend) ---
+# --- CORS middleware ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -336,8 +219,6 @@ async def meta_status():
     Returns semicolon-separated: ok;total;single;multi"""
     s = server_mgr.status()
     return f"ok;{s['total']};{s['single']};{s['multi']}"
-
-
 
 
 # --- User validation stubs (legacy client expects these) ---
@@ -390,82 +271,6 @@ async def civclient_launcher(request: Request):
         headers={"result": "success", "port": str(port),
                  "Access-Control-Expose-Headers": expose},
     )
-
-
-# --- Agent Management API ---
-
-@app.post("/game/create")
-async def api_create_game(body: dict):
-    agent_configs = body.get("agents", [])
-    if not agent_configs:
-        raise HTTPException(400, "Must provide at least one agent config")
-
-    for i, cfg in enumerate(agent_configs):
-        if isinstance(cfg, str):
-            agent_configs[i] = {"name": cfg}
-        elif "name" not in cfg:
-            raise HTTPException(400, f"Agent config at index {i} missing 'name'")
-
-    try:
-        await orchestrator.create_game(
-            agent_configs,
-            server_port=body.get("server_port"),
-            aifill=body.get("aifill", 0),
-        )
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-    return {
-        "status": "ok",
-        "server_port": orchestrator.server_port,
-        "observe_url": f"/webclient/index.html?action=observe&civserverport={orchestrator.server_port}",
-        "agents": [c["name"] for c in agent_configs],
-    }
-
-
-@app.get("/game/status")
-async def api_game_status():
-    if not orchestrator.agents:
-        return {"status": "no_game", "agents": []}
-    return {
-        "status": "running",
-        "server_port": orchestrator.server_port,
-        "agents": [a.get_status() for a in orchestrator.agents.values()],
-    }
-
-
-@app.delete("/game")
-async def api_delete_game():
-    await orchestrator.shutdown()
-    return {"status": "ok"}
-
-
-@app.get("/agents/{name}/state")
-async def api_agent_state(name: str):
-    agent = orchestrator.agents.get(name)
-    if not agent:
-        raise HTTPException(404, f"Agent '{name}' not found")
-    return agent.get_status()
-
-
-@app.post("/agents/{name}/command")
-async def api_agent_command(name: str, body: dict):
-    agent = orchestrator.agents.get(name)
-    if not agent:
-        raise HTTPException(404, f"Agent '{name}' not found")
-    command = body.get("command", "")
-    if not command:
-        raise HTTPException(400, "Must provide 'command' field")
-    result = await agent.submit_command(command)
-    return {"status": "ok", "message": result}
-
-
-@app.get("/agents/{name}/log")
-async def api_agent_log(name: str, limit: int = 50):
-    agent = orchestrator.agents.get(name)
-    if not agent:
-        raise HTTPException(404, f"Agent '{name}' not found")
-    return {"name": name, "log": agent.action_log[-limit:]}
 
 
 # --- Server management API ---
@@ -532,9 +337,6 @@ async def ws_civsocket(ws: WebSocket, proxy_port: int):
 
 
 # --- Static file serving ---
-# Serve the legacy web client directly from the webapp directory.
-# The legacy client uses webclient.min.js (pre-built JS bundle) with jQuery
-# and the 2D Canvas renderer — no Vite build needed.
 
 if WEBAPP_DIR.exists():
     logger.info("Serving legacy web client from %s", WEBAPP_DIR)
@@ -570,13 +372,11 @@ async def root():
 # CLI entry point
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="XBWorld Unified Server")
+    parser = argparse.ArgumentParser(description="XBWorld Game Server")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int,
                         default=int(os.getenv("PORT", "8080")),
                         help="HTTP server port (default $PORT or 8080)")
-    parser.add_argument("--agents", type=int, default=0,
-                        help="Auto-start a game with N agents")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -587,27 +387,12 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    print(f"[XBWorld] Starting server on {args.host}:{args.port}")
+    print(f"[XBWorld] Starting game server on {args.host}:{args.port}")
     print(f"[XBWorld] Open http://localhost:{args.port} in your browser")
-    if args.agents > 0:
-        print(f"[XBWorld] Will auto-start {args.agents}-agent game after server is ready")
 
     config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
     server = uvicorn.Server(config)
-
-    async def run():
-        task = asyncio.create_task(server.serve())
-        if args.agents > 0:
-            await asyncio.sleep(3)
-            agent_configs = [{"name": f"agent{i+1}"} for i in range(args.agents)]
-            try:
-                await orchestrator.create_game(agent_configs)
-                print(f"[XBWorld] Game started with {args.agents} agents on port {orchestrator.server_port}")
-            except Exception as e:
-                print(f"[XBWorld] Failed to auto-start game: {e}")
-        await task
-
-    asyncio.run(run())
+    asyncio.run(server.serve())
 
 
 if __name__ == "__main__":

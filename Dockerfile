@@ -1,13 +1,13 @@
 ###############################################################################
-# XBWorld Backend Docker image
+# XBWorld Game Server Docker image
 #
-# Contains the freeciv C server + Python agent orchestrator + WS proxy.
+# Contains the freeciv C server + WebSocket proxy. No LLM/agent dependencies.
 #
 # Build:
-#   docker build -t xbworld-backend .
+#   docker build -t xbworld-server .
 #
 # Run:
-#   docker run -p 8080:8080 xbworld-backend
+#   docker run -p 8080:8080 xbworld-server
 ###############################################################################
 
 ###############################################################################
@@ -46,9 +46,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/freeciv /opt/freeciv
 COPY server.py ws_proxy.py standalone_proxy.py config.py \
-     agent.py agent_tools.py game_client.py decision_engine.py \
-     llm_providers.py state_api.py main.py multi_main.py \
-     run_remote.py requirements.txt /app/
+     game_client.py requirements.txt /app/
 COPY static/ /app/static/
 COPY data/ /app/data/
 WORKDIR /app
