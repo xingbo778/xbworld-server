@@ -1,0 +1,21 @@
+version: "3"
+services:
+  xbworld-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: xbworld-backend
+    ports:
+      - "8080:8080"
+      - "6000-6009:6000-6009"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - XBWORLD_HOST=0.0.0.0
+      # - LLM_MODEL=openai/gemini-3-flash-preview
+      # - LLM_API_KEY=your-key-here
+      # - LLM_BASE_URL=https://your-llm-endpoint
+    volumes:
+      - data:/app/data/savegames
+
+volumes:
+  data:

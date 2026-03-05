@@ -1,0 +1,18 @@
+# Freeciv upstream version info
+#
+# FCREV: The upstream freeciv/freeciv commit that the xbworld branch
+#        was forked from. Used by the legacy apply_patches.sh workflow
+#        (now removed — kept here for reference only).
+#
+# ORIGCAPSTR / WEBCAPSTR: Network capability strings. The web client
+#        uses WEBCAPSTR instead of ORIGCAPSTR for protocol compatibility.
+#        These are baked into the server binary at build time.
+
+FCREV=add9f4e14ebf8609f369d586e42cd2ccca2bc6df
+
+ORIGCAPSTR="+Freeciv.Devel-\${MAIN_VERSION}-2024.Aug.30"
+
+# There's no need to bump this constantly as current freeciv-web
+# makes no connections to outside world - all connections are
+# internal to it. The server and client are always compatible.
+WEBCAPSTR="+Freeciv.Web.Devel-3.3"

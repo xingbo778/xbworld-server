@@ -1,0 +1,82 @@
+# XBWorld Branch — Custom Patches
+
+This document lists all custom commits on the `xbworld` branch of
+[xingbo778/freeciv](https://github.com/xingbo778/freeciv), applied on top
+of upstream `freeciv/freeciv` at commit `add9f4e14e`.
+
+## Fork Point
+
+- **Upstream commit**: `add9f4e14ebf8609f369d586e42cd2ccca2bc6df`
+- **Upstream branch**: `main`
+- **Description**: "Comment typofix: splitted -> split"
+
+## Custom Commits (oldest → newest)
+
+### 1. Protocol & Compatibility
+
+| Commit | Description |
+|--------|-------------|
+| `87dfc8c62b` | **feat: set web capstring** — Replaces the native network capability string with a web-compatible one for freeciv-web protocol compatibility. |
+
+### 2. Upstream Backports (Bug Fixes)
+
+These fix specific bugs reported in the Freeciv tracker:
+
+| Commit | Patch | Tracker |
+|--------|-------|---------|
+| `8396f811b4` | Fix combat veterancy chance | [RM #983](https://redmine.freeciv.org/issues/983) |
+| `23c5d8721f` | Make action selection dialog appear on airlift | [RM #1028](https://redmine.freeciv.org/issues/1028) |
+| `287812a8b6` | Send unit info only if server-side agent set | [RM #1104](https://redmine.freeciv.org/issues/1104) |
+
+### 3. Freeciv-Web Patches
+
+Patches ported from the [freeciv-web](https://github.com/freeciv/freeciv-web)
+project to make the server work with web clients:
+
+| Commit | Patch Name | Purpose |
+|--------|------------|---------|
+| `3e153f4d33` | RevertAmplio2ExtraUnits | Revert breaking changes from amplio2 extra_units.spec |
+| `9402537359` | meson_webperimental | Install webperimental ruleset via meson |
+| `c79cb26281` | metachange | Metaserver integration changes |
+| `6d52c4cea3` | text_fixes | Text and translation fixes |
+| `68469f2af0` | freeciv-svn-webclient-changes | Core server changes for web client support |
+| `03147b7c38` | goto_fcweb | Goto/pathfinding adjustments for web |
+| `d2b9cd9371` | savegame | Savegame format changes for web compatibility |
+| `0004eb19c5` | maphand_ch | Map handling changes for web client |
+| `315287af6f` | server_password | Server password authentication support |
+| `2e772c944b` | scorelog_filenames | Custom scorelog filename handling |
+| `9b7eaddf2a` | longturn | Basic longturn mode for Freeciv-web |
+| `bb3cdb6bc2` | load_command_confirmation | Log message confirming load completion (used by Freeciv-web to issue follow-up commands) |
+| `555dddafb0` | webgl_vision_cheat_temporary | Temporary: reveal terrain types to WebGL client |
+| `0ecd075907` | endgame-mapimg | Generate map image at endgame for hall of fame |
+| `b3849c5fea` | stdsounds_format | Standard sounds format compatibility |
+
+### 4. XBWorld Custom
+
+| Commit | Description |
+|--------|-------------|
+| `9364fd8f43` | **feat: add xbworld custom ruleset** — Adds the `data/xbworld/` ruleset directory based on webperimental, customized for AI-agent games. Includes all `.ruleset` files, `script.lua`, and `README.xbworld`. |
+
+### 5. Cleanup (this optimization pass)
+
+| Commit | Description |
+|--------|-------------|
+| *(latest)* | **chore: remove .orig backup files** — Removes 8 `.orig` files (35K lines) left over from the patch workflow. |
+| *(latest)* | **fix: update XBWorld ruleset naming and Lua safety** — Renames "Webperimental" → "XBWorld", fixes typo, standardizes descriptions, adds zero-guards in `script.lua`. |
+
+## Known Issues in C Code
+
+These are pre-existing FIXMEs/TODOs in the upstream code that are
+particularly relevant to XBWorld:
+
+| File | Line | Issue | Impact |
+|------|------|-------|--------|
+| `server/scripting/api_server_game_methods.c` | 97 | Client unaware when player killed by Lua script | **High** — affects AI-agent games |
+| `server/srv_main.c` | 2636 | Web client: connection username == player name assumption | **High** — may cause issues with multiple connections |
+| `server/srv_main.c` | 2993 | HACK: skip wait during AI phases | **Medium** — hardcoded behavior |
+| `server/diplomats.c` | 1528 | Lua script may have destroyed diplomat | **Medium** — potential null dereference |
+| `server/cityturn.c` | 2496 | Duplicate of `can_upgrade_unittype` | **Low** — code duplication |
+| `server/srv_main.h` | 44 | `load_filename[512]` may be too short | **Low** — potential buffer issue |
+
+These are tracked for future work but not modified in this pass to
+minimize risk of breaking upstream compatibility.

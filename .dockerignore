@@ -1,0 +1,32 @@
+# Git
+.git/
+.gitmodules
+
+# Python
+.venv/
+*.pyc
+__pycache__/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.py
+
+# Docker
+docker-compose*.yml
+
+# Runtime data
+data/savegames/

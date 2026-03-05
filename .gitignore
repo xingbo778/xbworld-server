@@ -1,0 +1,29 @@
+# Freeciv C server build artifacts (source is a git submodule)
+freeciv/build/
+
+# Python
+.venv/
+*.pyc
+__pycache__/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker
+.vagrant/
+docker-compose.override.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data directory runtime files
+data/savegames/

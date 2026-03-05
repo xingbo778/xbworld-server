@@ -1,0 +1,4 @@
+[submodule "freeciv/freeciv"]
+	path = freeciv/freeciv
+	url = https://github.com/xingbo778/freeciv.git
+	branch = xbworld

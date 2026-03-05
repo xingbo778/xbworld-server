@@ -1,0 +1,10 @@
+set compresstype xz
+lock compresstype
+set maxconnectionsperhost 256
+lock maxconnectionsperhost
+
+# Environmental disasters are too slow for the web client to handle.
+set globalwarming disabled
+lock globalwarming
+set nuclearwinter disabled
+lock nuclearwinter
