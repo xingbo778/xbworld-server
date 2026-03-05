@@ -14,6 +14,9 @@ _PORT_SUFFIX = "" if SERVER_PORT in (80, 443) else f":{SERVER_PORT}"
 LAUNCHER_URL = f"{_HTTP_SCHEME}://{SERVER_HOST}{_PORT_SUFFIX}/civclientlauncher"
 WS_BASE_URL = f"{_WS_SCHEME}://{SERVER_HOST}{_PORT_SUFFIX}/civsocket"
 
+# Client
+MAX_MESSAGES_KEPT = 200
+
 # Game protocol (must match freeciv-server)
 FREECIV_VERSION = "+Freeciv.Web.Devel-3.3"
 MAJOR_VERSION = 3
