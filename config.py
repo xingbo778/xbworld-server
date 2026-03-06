@@ -18,7 +18,7 @@ WS_BASE_URL = f"{_WS_SCHEME}://{SERVER_HOST}{_PORT_SUFFIX}/civsocket"
 MAX_MESSAGES_KEPT = 200
 
 # Game protocol (must match freeciv-server)
-FREECIV_VERSION = "+Freeciv.Web.Devel-3.3"
+FREECIV_VERSION = "+Freeciv.Web.Devel-3.4"
 MAJOR_VERSION = 3
-MINOR_VERSION = 1
+MINOR_VERSION = 3
 PATCH_VERSION = 90
