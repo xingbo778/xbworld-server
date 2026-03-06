@@ -53,6 +53,7 @@ class ServerManager:
 
     def __init__(self):
         self._servers: dict[int, subprocess.Popen] = {}
+        self._log_files: dict[int, object] = {}
         self._log_dir = PROJECT_ROOT / "logs"
         self._log_dir.mkdir(exist_ok=True)
 
@@ -86,15 +87,17 @@ class ServerManager:
         if not Path(serv_script).exists():
             raise RuntimeError(f"serv script not found: {serv_script}")
 
+        log_fh = open(log_file, "w")
         self._servers[port] = subprocess.Popen(
             [freeciv_bin, "--debug", "1", "--port", str(port),
              "--Announce", "none",
              "--read", serv_script],
-            stdout=open(log_file, "w"),
+            stdout=log_fh,
             stderr=subprocess.STDOUT,
             env=env,
             cwd=str(data_dir),
         )
+        self._log_files[port] = log_fh
 
         logger.info("Spawned freeciv-server on port %d (pid %d), log=%s",
                      port, self._servers[port].pid, log_file)
@@ -102,6 +105,8 @@ class ServerManager:
         time.sleep(1)
         rc = self._servers[port].poll()
         if rc is not None:
+            log_fh.close()
+            self._log_files.pop(port, None)
             log_content = log_file.read_text()[:2000] if log_file.exists() else "(no log)"
             logger.error("freeciv-server exited immediately (code %d): %s", rc, log_content)
             self._servers.pop(port, None)
@@ -111,6 +116,7 @@ class ServerManager:
 
     def kill_game(self, port: int):
         proc = self._servers.pop(port, None)
+        log_fh = self._log_files.pop(port, None)
         if proc and proc.poll() is None:
             try:
                 os.kill(proc.pid, signal.SIGTERM)
@@ -121,6 +127,11 @@ class ServerManager:
                 except Exception:
                     pass
             logger.info("Stopped server for port %d", port)
+        if log_fh:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
 
     def kill_all(self):
         for port in list(self._servers.keys()):

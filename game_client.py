@@ -582,7 +582,7 @@ class GameClient:
                 "emerg_version": 0,
                 "distribution": "",
             }
-            asyncio.ensure_future(self.send_packet(client_info))
+            asyncio.create_task(self.send_packet(client_info))
         else:
             logger.error("[%s] Server REJECTED join: %s", self.username, pkt.get("message"))
 
@@ -594,7 +594,7 @@ class GameClient:
                 logger.info("[%s] Assigned player_id=%d", self.username, player_num)
 
     def _on_conn_ping(self, pkt: dict):
-        asyncio.ensure_future(self.send_packet({"pid": PACKET_CONN_PONG}))
+        asyncio.create_task(self.send_packet({"pid": PACKET_CONN_PONG}))
 
     def _on_game_info(self, pkt: dict):
         new_turn = pkt.get("turn", self.state.turn)
@@ -685,7 +685,7 @@ class GameClient:
             if old_researching >= 0 and new_researching < 0:
                 logger.info("[%s] Tech '%s' completed! Auto-picking next research...",
                             self.username, old_name)
-                asyncio.ensure_future(self._auto_pick_research(pkt))
+                asyncio.create_task(self._auto_pick_research(pkt))
         self.state.research = pkt
 
     async def _auto_pick_research(self, research_pkt: dict):
@@ -720,7 +720,7 @@ class GameClient:
                      len(self.state.players), len(self.state.my_units()), len(self.state.my_cities()))
         self._turn_event.set()
         for cb in self._on_turn_callbacks:
-            asyncio.ensure_future(cb(self))
+            asyncio.create_task(cb(self))
 
     def _on_end_turn(self, pkt: dict):
         logger.info("[%s] END_TURN: turn=%d", self.username, self.state.turn)
