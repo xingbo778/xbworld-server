@@ -24,7 +24,7 @@ COPY freeciv/ /build/freeciv/
 WORKDIR /build/freeciv
 RUN if [ ! -f freeciv/meson.build ]; then \
         rm -rf freeciv && \
-        git clone --depth 1 --branch xbworld \
+        git clone --depth 1 --branch xbworld-3.4 \
             https://github.com/xingbo778/freeciv.git freeciv; \
     fi
 RUN meson setup build freeciv -Dserver='freeciv-web' \
