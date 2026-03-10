@@ -25,6 +25,56 @@ logger = logging.getLogger("xbworld-proxy")
 CONNECTION_LIMIT = 1000
 _connections: dict[str, "CivBridge"] = {}
 
+# ---------------------------------------------------------------------------
+# Per-port tile cache: captures MAP_INFO (pid=17) and TILE_INFO (pid=15)
+# from the first (host) connection and replays them to later browser clients
+# that join mid-game and don't receive an initial tile dump from the server.
+# ---------------------------------------------------------------------------
+PID_PROCESSING_STARTED = 0
+PID_PROCESSING_FINISHED = 1
+PID_MAP_INFO = 17
+PID_TILE_INFO = 15
+
+_tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, locked}
+
+
+def _cache_feed_raw(server_port: int, pid: int, packet_json: str) -> None:
+    """Store a MAP_INFO or TILE_INFO packet in the tile cache."""
+    cache = _tile_cache.get(server_port)
+    if cache and cache.get("locked"):
+        return  # cache is complete — don't overwrite with stale updates
+    if pid == PID_MAP_INFO:
+        if cache is None:
+            cache = {"map_info": None, "tiles": [], "locked": False}
+            _tile_cache[server_port] = cache
+        cache["map_info"] = packet_json
+        logger.info("[tile-cache:%d] cached MAP_INFO", server_port)
+    elif pid == PID_TILE_INFO:
+        if cache is None:
+            cache = {"map_info": None, "tiles": [], "locked": False}
+            _tile_cache[server_port] = cache
+        cache["tiles"].append(packet_json)
+        if len(cache["tiles"]) % 500 == 0:
+            logger.info("[tile-cache:%d] cached %d TILE_INFO packets",
+                        server_port, len(cache["tiles"]))
+
+
+def _cache_lock(server_port: int) -> None:
+    """Mark the cache as complete (no more tiles expected)."""
+    cache = _tile_cache.get(server_port)
+    if cache and cache.get("map_info") and cache.get("tiles"):
+        cache["locked"] = True
+        logger.info("[tile-cache:%d] locked (%d tiles)", server_port, len(cache["tiles"]))
+
+
+def _cache_get_replay(server_port: int) -> Optional[str]:
+    """Return a WebSocket message containing cached MAP_INFO + TILE_INFO, or None."""
+    cache = _tile_cache.get(server_port)
+    if not cache or not cache.get("map_info") or not cache.get("tiles"):
+        return None
+    parts = ['{"pid":0}', cache["map_info"]] + cache["tiles"] + ['{"pid":1}']
+    return "[" + ",".join(parts) + "]"
+
 
 def validate_username(name: str) -> bool:
     if not name or len(name) <= 2 or len(name) >= 32:
@@ -48,6 +98,8 @@ class CivBridge:
         self._tcp_pkt_count = 0
         self._ws_send_count = 0
         self._start_time = time.monotonic()
+        self._tile_cache_injected = False  # whether we've replayed cached tiles
+        self._processing_count = 0         # count of PROCESSING_FINISHED seen
 
     async def connect_to_server(self, login_packet: str) -> bool:
         logger.info("[proxy:%s] Connecting to civserver at 127.0.0.1:%d", self.username, self.server_port)
@@ -129,10 +181,48 @@ class CivBridge:
 
                 try:
                     text = body.decode("utf-8", errors="ignore")
-                    self._send_buffer.append(text)
                 except UnicodeDecodeError:
                     logger.error("[proxy:%s] UTF-8 decode error", self.username)
                     continue
+
+                # Parse pid once for caching and injection logic
+                try:
+                    pid = json.loads(text).get("pid")
+                except Exception:
+                    pid = None
+
+                # Feed MAP_INFO and TILE_INFO into tile cache
+                if pid in (PID_MAP_INFO, PID_TILE_INFO):
+                    _cache_feed_raw(self.server_port, pid, text)
+
+                self._send_buffer.append(text)
+
+                if pid == PID_PROCESSING_FINISHED:
+                    self._processing_count += 1
+                    # Lock cache after the first processing batch that has tiles
+                    _cache_lock(self.server_port)
+                    # Inject cached tiles to this client on the FIRST processing_finished
+                    if not self._tile_cache_injected:
+                        replay = _cache_get_replay(self.server_port)
+                        if replay:
+                            self._tile_cache_injected = True
+                            logger.info(
+                                "[proxy:%s] Injecting cached tile data (port=%d, tiles=%d)",
+                                self.username, self.server_port,
+                                len(_tile_cache.get(self.server_port, {}).get("tiles", []))
+                            )
+                            # Flush current buffer first, then inject
+                            flush_ok = await self._flush_to_client()
+                            if not flush_ok:
+                                break
+                            try:
+                                await self.ws.send_text(replay)
+                                self._ws_send_count += 1
+                            except Exception as e:
+                                logger.error("[proxy:%s] Failed to send tile cache: %s", self.username, e)
+                                self._stopped = True
+                                break
+                            continue  # skip normal flush below (already flushed)
 
                 flush_ok = await self._flush_to_client()
                 if not flush_ok:
