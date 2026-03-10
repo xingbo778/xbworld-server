@@ -265,6 +265,17 @@ async def civclient_launcher(request: Request):
                      "Access-Control-Expose-Headers": expose},
         )
 
+    # For observe action, join an existing running game if available
+    if action == "observe":
+        status = server_mgr.status()
+        if status["ports"]:
+            port = status["ports"][0]
+            return JSONResponse(
+                content={"port": port, "result": "success"},
+                headers={"result": "success", "port": str(port),
+                         "Access-Control-Expose-Headers": expose},
+            )
+
     game_type = "multiplayer" if action == "multi" else "singleplayer"
 
     try:
@@ -277,11 +288,39 @@ async def civclient_launcher(request: Request):
         )
 
     await asyncio.sleep(1.5)
+
+    # For observe action with a newly spawned game, auto-start it with AI players
+    if action == "observe":
+        asyncio.create_task(_autostart_game(port))
+
     return JSONResponse(
         content={"port": port, "result": "success"},
         headers={"result": "success", "port": str(port),
                  "Access-Control-Expose-Headers": expose},
     )
+
+
+async def _autostart_game(port: int):
+    """Connect internally, start the game, and stay connected until it ends.
+
+    Staying connected prevents freeciv from ending the session when the only
+    human player leaves (singleplayer mode). autotoggle handles turns for us.
+    """
+    from game_client import GameClient
+    client = GameClient(username="host")
+    try:
+        await client.join_game(port)
+        await asyncio.sleep(2.0)
+        await client.send_chat("/set timeout 60")
+        await asyncio.sleep(0.3)
+        await client.send_chat("/start")
+        logger.info("[autostart] Started game on port %d, host staying connected", port)
+        # Stay connected for the lifetime of the game (autotoggle handles turns)
+        await client.wait_for_new_turn(timeout=86400.0)
+    except Exception as e:
+        logger.warning("[autostart] game on port %d ended: %s", port, e)
+    finally:
+        await client.close()
 
 
 # --- Server management API ---
