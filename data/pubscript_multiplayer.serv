@@ -1,6 +1,7 @@
 read web.serv
 
 rulesetdir xbworld
+set fogofwar disabled
 cmdlevel ctrl first
 set topology ""
 set wrap WRAPX

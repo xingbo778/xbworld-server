@@ -1,6 +1,7 @@
 read web.serv
 
 rulesetdir xbworld
+set fogofwar disabled
 mapimg define 'zoom=2:map=tcub:turns=5:format=png'
 cmdlevel ctrl first
 set topology ""
