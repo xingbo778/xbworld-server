@@ -9,6 +9,7 @@ set nationset all
 set maxplayers 32
 set allowtake H1Ah1adOo
 set autotoggle enabled
+set revealmap GLOBAL
 set netwait 20
 set nettimeout 120
 set pingtime 30
