@@ -95,12 +95,16 @@ def _cache_feed_city(server_port: int, city_id: int, packet_json: str) -> None:
     observer receives an up-to-date city snapshot even after the tile cache has
     been locked.  Each city is stored by its integer ID so updates overwrite
     stale entries without growing unboundedly.
+
+    ``cities_joined`` is cleared on every update so that _cache_get_replay()
+    rebuilds the joined string lazily on the next observer join.
     """
     cache = _tile_cache.get(server_port)
     if cache is None:
         cache = {"map_info": None, "tiles": [], "cities": {}, "locked": False}
         _tile_cache[server_port] = cache
     cache.setdefault("cities", {})[city_id] = packet_json
+    cache.pop("cities_joined", None)  # invalidate lazy join cache
 
 
 def _cache_remove_city(server_port: int, city_id: int) -> None:
@@ -108,6 +112,7 @@ def _cache_remove_city(server_port: int, city_id: int) -> None:
     cache = _tile_cache.get(server_port)
     if cache:
         cache.get("cities", {}).pop(city_id, None)
+        cache.pop("cities_joined", None)  # invalidate lazy join cache
 
 
 def _cache_feed_player(server_port: int, playerno: int, name: str, ai_control: bool) -> None:
@@ -182,9 +187,15 @@ def _cache_get_replay(server_port: int) -> Optional[str]:
         if not cache.get("map_info") or not cache.get("tiles"):
             return None
         prefix = ",".join(['{"pid":0}', cache["map_info"]] + cache["tiles"])
-    city_packets = cache.get("cities", {}).values()
-    if city_packets:
-        return "[" + prefix + "," + ",".join(city_packets) + ',{"pid":1}]'
+    cities = cache.get("cities", {})
+    if cities:
+        # Lazily cache the joined city string; rebuilt only when a city
+        # is added or removed (cache["cities_joined"] is cleared on change).
+        cities_joined = cache.get("cities_joined")
+        if cities_joined is None:
+            cities_joined = ",".join(cities.values())
+            cache["cities_joined"] = cities_joined
+        return "[" + prefix + "," + cities_joined + ',{"pid":1}]'
     return "[" + prefix + ',{"pid":1}]'
 
 
