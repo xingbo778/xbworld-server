@@ -242,10 +242,10 @@ class CivBridge:
     async def connect_to_server(self, login_packet: str) -> bool:
         logger.info("[proxy:%s] Connecting to civserver at 127.0.0.1:%d", self.username, self.server_port)
         try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", self.server_port),
-                timeout=5.0,
-            )
+            async with asyncio.timeout(5.0):
+                self._reader, self._writer = await asyncio.open_connection(
+                    "127.0.0.1", self.server_port
+                )
         except (OSError, asyncio.TimeoutError) as e:
             logger.error("[proxy:%s] Failed to connect to civserver port %d: %s",
                          self.username, self.server_port, e)
@@ -299,24 +299,32 @@ class CivBridge:
         # _tile_cache_locked starts False and only ever flips to True, so we
         # can keep a local mirror and sync back to the instance when it changes.
         server_port = self.server_port
+        username = self.username
+        reader = self._reader
         buf_append = self._send_buffer.append
         _tile_cache_locked = False  # mirrors self._tile_cache_locked
         try:
-            while not self._stopped and self._reader:
-                header_data = await self._read_exact(2)
-                if header_data is None:
-                    exit_reason = "TCP read returned None (connection closed or timeout)"
+            while not self._stopped and reader:
+                # Inline header read — avoids 2 method calls + self._reader LOAD_ATTR per packet.
+                try:
+                    async with asyncio.timeout(300):
+                        header_data = await reader.readexactly(2)
+                except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError) as e:
+                    exit_reason = f"header read failed: {type(e).__name__}"
                     break
 
                 packet_size = int.from_bytes(header_data, 'big')
                 body_size = packet_size - 2
                 if body_size <= 0 or body_size > 32767:
-                    logger.error("[proxy:%s] Invalid packet size %d from server", self.username, body_size)
+                    logger.error("[proxy:%s] Invalid packet size %d from server", username, body_size)
                     continue
 
-                body = await self._read_exact(body_size)
-                if body is None:
-                    exit_reason = "TCP body read returned None"
+                # Inline body read.
+                try:
+                    async with asyncio.timeout(300):
+                        body = await reader.readexactly(body_size)
+                except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError) as e:
+                    exit_reason = f"body read failed: {type(e).__name__}"
                     break
 
                 # body_size > 0 is already checked above, so body is non-empty.
@@ -327,7 +335,7 @@ class CivBridge:
                 try:
                     text = body.decode("utf-8", errors="ignore")
                 except UnicodeDecodeError:
-                    logger.error("[proxy:%s] UTF-8 decode error", self.username)
+                    logger.error("[proxy:%s] UTF-8 decode error", username)
                     continue
 
                 # Extract pid: Freeciv packets always start with {"pid":N,...
@@ -407,7 +415,7 @@ class CivBridge:
                             logger.info(
                                 "[proxy:%s] Injecting cached tile+city data "
                                 "(port=%d, tiles=%d, cities=%d)",
-                                self.username, server_port,
+                                username, server_port,
                                 len(_cache_snap.get("tiles", [])),
                                 len(_cache_snap.get("cities", {})),
                             )
@@ -419,7 +427,7 @@ class CivBridge:
                                 await self.ws.send_text(replay)
                                 self._ws_send_count += 1
                             except Exception as e:
-                                logger.error("[proxy:%s] Failed to send tile cache: %s", self.username, e)
+                                logger.error("[proxy:%s] Failed to send tile cache: %s", username, e)
                                 self._stopped = True
                                 break
                             # For late-joining observers, proactively send /take <ai_player>
@@ -436,13 +444,13 @@ class CivBridge:
                                     logger.info(
                                         "[proxy:%s] Sent /take %s to trigger city resync "
                                         "(port=%d)",
-                                        self.username, ai_name, server_port,
+                                        username, ai_name, server_port,
                                     )
                                 else:
                                     logger.warning(
                                         "[proxy:%s] Late observer but no AI player name cached yet "
                                         "(port=%d) — skipping /take; browser JS will handle it",
-                                        self.username, server_port,
+                                        username, server_port,
                                     )
                             continue  # skip normal flush below (already flushed)
 
@@ -458,21 +466,13 @@ class CivBridge:
             exit_reason = "cancelled"
         except Exception as e:
             exit_reason = f"exception: {type(e).__name__}: {e}"
-            logger.warning("[proxy:%s] Server reader error: %s", self.username, e)
+            logger.warning("[proxy:%s] Server reader error: %s", username, e)
         finally:
             logger.info("[proxy:%s] _server_reader_loop exited: reason='%s' tcp_pkts=%d ws_sends=%d",
-                         self.username, exit_reason, self._tcp_pkt_count, self._ws_send_count)
+                         username, exit_reason, self._tcp_pkt_count, self._ws_send_count)
             if not self._stopped:
-                logger.info("[proxy:%s] TCP connection from civserver closed (server initiated)", self.username)
+                logger.info("[proxy:%s] TCP connection from civserver closed (server initiated)", username)
                 await self.close()
-
-    async def _read_exact(self, n: int) -> Optional[bytes]:
-        try:
-            data = await asyncio.wait_for(self._reader.readexactly(n), timeout=300)
-            return data
-        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError) as e:
-            logger.info("[proxy:%s] _read_exact(%d) failed: %s", self.username, n, type(e).__name__)
-            return None
 
     async def _flush_to_client(self) -> bool:
         """Flush send buffer to WebSocket client. Returns False if send failed."""
