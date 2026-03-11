@@ -331,8 +331,9 @@ class CivBridge:
                     exit_reason = f"body read failed: {type(e).__name__}"
                     break
 
-                # body_size > 0 is already checked above, so body is non-empty.
-                body = body[:-1] if body[-1] == 0 else body
+                # Freeciv always appends a NUL terminator (protocol invariant).
+                # Strip unconditionally — saves a per-packet byte comparison.
+                body = body[:-1]
 
                 _tcp_pkt_count += 1
 
