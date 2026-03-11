@@ -80,6 +80,7 @@ project to make the server work with web clients:
 | `88b8e89719` | **perf: O(P²)→O(P) in adv_data_phase_init allied_with_enemy loop** — Pre-builds `adv_enemies[]` (pplayer's war enemies) before the outer aplayer loop; the inner `players_iterate(check_pl)` is replaced by a scan over this short list plus early `break`, eliminating the O(P²) pattern in the advisor diplomacy init. |
 | `044428e231` | **perf: O(P²)→O(P) in dai_data_phase_begin ai_dip_intel loop** — Pre-builds `ddat_enemies[]` and `ddat_allies[]` for pplayer before the outer aplayer loop; three inner field assignments replaced by targeted scans over these small lists (0–3 entries typical), reducing total work from O(P²) to O(P) per pplayer per turn. |
 | `5f8d496b88` | **perf: hoist has_handicap() out of EFT_GAIN_AI_LOVE players_iterate loop in daieffects.c** — `has_handicap(pplayer, H_DEFENSIVE)` is pplayer-constant; calling it once per AI player wasted O(P) calls per `dai_effect_value()` invocation. Pre-compute `per_ai` once, count `n_ai` in one pass, then `v += n_ai * per_ai`. |
+| `4e5c04a5d2` | **perf: merge production_leader and tech_leader scans into one O(P) pass in advdata.c** — `adv_data_phase_init()` ran two consecutive `players_iterate` loops to find the production leader (max score.mfg) and tech leader (max score.techs). Merged into one loop, halving the per-player iteration count for these two max-finding scans. |
 
 ## Known Issues in C Code
 
