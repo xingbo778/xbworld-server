@@ -1043,3 +1043,139 @@ class TestCivBridgeObserverTake:
         bundle = json.loads(replay_msg)
         city_names = [p.get("name") for p in bundle if p.get("pid") == 31]
         assert "Carthage" in city_names
+
+
+# ---------------------------------------------------------------------------
+# Fast pid extraction (_PID_RE regex) and pre-computed tile prefix
+# ---------------------------------------------------------------------------
+class TestFastPidExtraction:
+    """Tests for the _PID_RE regex used to avoid full json.loads in the hot path."""
+
+    def test_pid_re_matches_simple(self):
+        from ws_proxy import _PID_RE
+        m = _PID_RE.search('{"pid":15,"x":3,"y":4}')
+        assert m is not None
+        assert int(m.group(1)) == 15
+
+    def test_pid_re_matches_with_space(self):
+        from ws_proxy import _PID_RE
+        m = _PID_RE.search('{"pid" : 17, "xsize":20}')
+        assert m is not None
+        assert int(m.group(1)) == 17
+
+    def test_pid_re_matches_pid_zero(self):
+        from ws_proxy import _PID_RE
+        m = _PID_RE.search('{"pid":0}')
+        assert m is not None
+        assert int(m.group(1)) == 0
+
+    def test_pid_re_matches_negative(self):
+        from ws_proxy import _PID_RE
+        m = _PID_RE.search('{"pid":-1,"data":"x"}')
+        assert m is not None
+        assert int(m.group(1)) == -1
+
+    def test_pid_re_no_match(self):
+        from ws_proxy import _PID_RE
+        assert _PID_RE.search('{"data":42}') is None
+
+    def test_pid_re_large_pid(self):
+        from ws_proxy import _PID_RE
+        m = _PID_RE.search('{"pid":999,"foo":"bar"}')
+        assert int(m.group(1)) == 999
+
+
+class TestTilesCachePrefix:
+    """Tests for the pre-computed tiles_prefix string set by _cache_lock."""
+
+    PORT = 19020
+
+    def setup_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+
+    def teardown_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+
+    def test_lock_sets_tiles_prefix(self):
+        from ws_proxy import _cache_feed_raw, _cache_lock, _tile_cache
+        _cache_feed_raw(self.PORT, 17, '{"pid":17}')
+        _cache_feed_raw(self.PORT, 15, '{"pid":15,"tile":0}')
+        _cache_feed_raw(self.PORT, 15, '{"pid":15,"tile":1}')
+        _cache_lock(self.PORT)
+        prefix = _tile_cache[self.PORT].get("tiles_prefix")
+        assert prefix is not None
+        assert '{"pid":0}' in prefix
+        assert '{"pid":17}' in prefix
+        assert '{"pid":15,"tile":0}' in prefix
+        assert '{"pid":15,"tile":1}' in prefix
+
+    def test_replay_uses_prefix_not_tiles_list(self):
+        """_cache_get_replay uses tiles_prefix and appends dynamic cities."""
+        from ws_proxy import _cache_feed_city, _cache_feed_raw, _cache_lock, _cache_get_replay
+        _cache_feed_raw(self.PORT, 17, '{"pid":17}')
+        _cache_feed_raw(self.PORT, 15, '{"pid":15,"tile":0}')
+        _cache_lock(self.PORT)
+        _cache_feed_city(self.PORT, 42, '{"pid":31,"id":42,"name":"Cairo"}')
+
+        replay = _cache_get_replay(self.PORT)
+        assert replay is not None
+        data = json.loads(replay)
+        pids = [p["pid"] for p in data]
+        assert pids[0] == 0   # PROCESSING_STARTED
+        assert 17 in pids     # MAP_INFO
+        assert 15 in pids     # TILE_INFO
+        assert 31 in pids     # CITY_INFO
+        assert pids[-1] == 1  # PROCESSING_FINISHED
+        names = [p.get("name") for p in data if p.get("pid") == 31]
+        assert "Cairo" in names
+
+    def test_replay_fallback_without_prefix(self):
+        """If tiles_prefix absent (old cache), _cache_get_replay builds it inline."""
+        from ws_proxy import _tile_cache, _cache_get_replay
+        _tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles":    ['{"pid":15}'],
+            "cities":   {},
+            "locked":   True,
+            # no tiles_prefix key
+        }
+        replay = _cache_get_replay(self.PORT)
+        assert replay is not None
+        data = json.loads(replay)
+        assert data[0]["pid"] == 0
+        assert data[-1]["pid"] == 1
+
+    def test_replay_no_cities(self):
+        """Replay with zero cities still has correct structure."""
+        from ws_proxy import _cache_feed_raw, _cache_lock, _cache_get_replay
+        _cache_feed_raw(self.PORT, 17, '{"pid":17}')
+        _cache_feed_raw(self.PORT, 15, '{"pid":15}')
+        _cache_lock(self.PORT)
+        replay = _cache_get_replay(self.PORT)
+        data = json.loads(replay)
+        assert data[0]["pid"] == 0
+        assert data[-1]["pid"] == 1
+        city_pkts = [p for p in data if p.get("pid") == 31]
+        assert city_pkts == []
+
+    def test_locked_tile_cache_updates_cities_after_lock(self):
+        """Cities added after lock appear in subsequent replays (tiles_prefix unchanged)."""
+        from ws_proxy import _cache_feed_raw, _cache_lock, _cache_feed_city, _cache_get_replay, _tile_cache
+        _cache_feed_raw(self.PORT, 17, '{"pid":17}')
+        _cache_feed_raw(self.PORT, 15, '{"pid":15}')
+        _cache_lock(self.PORT)
+        prefix_before = _tile_cache[self.PORT].get("tiles_prefix")
+
+        _cache_feed_city(self.PORT, 1, '{"pid":31,"id":1,"name":"Thebes"}')
+        _cache_feed_city(self.PORT, 2, '{"pid":31,"id":2,"name":"Memphis"}')
+
+        # tiles_prefix unchanged
+        assert _tile_cache[self.PORT].get("tiles_prefix") == prefix_before
+
+        replay = _cache_get_replay(self.PORT)
+        data = json.loads(replay)
+        names = {p.get("name") for p in data if p.get("pid") == 31}
+        assert "Thebes" in names
+        assert "Memphis" in names

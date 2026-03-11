@@ -39,7 +39,18 @@ PID_CITY_REMOVE = 30
 PID_PLAYER_INFO = 51
 PID_PLAYER_REMOVE = 50
 
-_tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, cities, locked}
+# Pids that require a full json.loads in the server reader hot-path.
+# All other pids (MAP_INFO, TILE_INFO, PROCESSING_STARTED/FINISHED, …) only
+# need the pid value, which is extracted cheaply by regex.
+_PIDS_NEEDING_FULL_PARSE = frozenset([
+    PID_CITY_INFO, PID_CITY_REMOVE, PID_PLAYER_INFO, PID_PLAYER_REMOVE,
+])
+
+# Fast pid extraction without full JSON parse.  Pattern matches the very
+# first "pid" key in the freeciv JSON frame, which is always at the start.
+_PID_RE = re.compile(r'"pid"\s*:\s*(-?\d+)')
+
+_tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, cities, locked, tiles_prefix}
 
 # Per-port player registry used to pick an AI player for the /take command.
 # Keyed by (server_port, playerno); value is {"name": str, "ai": bool}.
@@ -125,10 +136,17 @@ def _cache_lock(server_port: int) -> None:
     """Lock the tile portion of the cache (no more MAP_INFO / TILE_INFO updates).
 
     City data continues to be updated after locking — only tiles are frozen.
+    Pre-computes the immutable tiles prefix string so _cache_get_replay() only
+    needs to append the (smaller, dynamic) city list on each observer join.
     """
     cache = _tile_cache.get(server_port)
     if cache and cache.get("map_info") and cache.get("tiles"):
         cache["locked"] = True
+        # Build the invariant part of the replay once: PROCESSING_STARTED +
+        # MAP_INFO + all TILE_INFO packets, joined ready for embedding in [...]
+        cache["tiles_prefix"] = ",".join(
+            ['{"pid":0}', cache["map_info"]] + cache["tiles"]
+        )
         logger.info("[tile-cache:%d] locked (%d tiles, %d cities so far)",
                     server_port, len(cache["tiles"]), len(cache.get("cities", {})))
 
@@ -140,13 +158,24 @@ def _cache_get_replay(server_port: int) -> Optional[str]:
     state; tiles are frozen at lock time.  Packet order mirrors what the server
     sends during a normal initial state dump:
         PROCESSING_STARTED → MAP_INFO → TILE_INFO* → CITY_INFO* → PROCESSING_FINISHED
+
+    Uses the pre-built ``tiles_prefix`` string (set in _cache_lock) so the
+    expensive join over thousands of tile packets only happens once, not on
+    every observer join.
     """
     cache = _tile_cache.get(server_port)
-    if not cache or not cache.get("map_info") or not cache.get("tiles"):
+    if not cache:
         return None
-    city_packets = list(cache.get("cities", {}).values())
-    parts = ['{"pid":0}', cache["map_info"]] + cache["tiles"] + city_packets + ['{"pid":1}']
-    return "[" + ",".join(parts) + "]"
+    prefix = cache.get("tiles_prefix")
+    if not prefix:
+        # Fallback for caches locked before this optimisation was deployed.
+        if not cache.get("map_info") or not cache.get("tiles"):
+            return None
+        prefix = ",".join(['{"pid":0}', cache["map_info"]] + cache["tiles"])
+    city_packets = cache.get("cities", {}).values()
+    if city_packets:
+        return "[" + prefix + "," + ",".join(city_packets) + ',{"pid":1}]'
+    return "[" + prefix + ',{"pid":1}]'
 
 
 def validate_username(name: str) -> bool:
@@ -259,43 +288,46 @@ class CivBridge:
                     logger.error("[proxy:%s] UTF-8 decode error", self.username)
                     continue
 
-                # Parse pid (and city_id when needed) for caching and injection logic.
-                # We already paid the json.loads cost here, so we reuse the parsed
-                # object rather than parsing again in the cache helpers.
-                try:
-                    parsed_pkt = json.loads(text)
-                    pid = parsed_pkt.get("pid")
-                except Exception:
-                    parsed_pkt = None
-                    pid = None
+                # Extract pid cheaply with a regex — avoids a full json.loads
+                # for every packet.  TILE_INFO dominates during initial sync
+                # (thousands of packets) and only needs the pid value.
+                # Full parsing is deferred to the specific pids that need it.
+                _m = _PID_RE.search(text)
+                pid = int(_m.group(1)) if _m else None
 
                 # Feed MAP_INFO and TILE_INFO into tile cache (locked after first batch)
-                if pid in (PID_MAP_INFO, PID_TILE_INFO):
+                if pid == PID_MAP_INFO or pid == PID_TILE_INFO:
                     _cache_feed_raw(self.server_port, pid, text)
-                # Feed CITY_INFO into city cache — always updated, never locked
-                elif pid == PID_CITY_INFO and parsed_pkt is not None:
-                    city_id = parsed_pkt.get("id")
-                    if city_id is not None:
-                        _cache_feed_city(self.server_port, city_id, text)
-                # Remove destroyed cities from cache
-                elif pid == PID_CITY_REMOVE and parsed_pkt is not None:
-                    city_id = parsed_pkt.get("city_id")
-                    if city_id is not None:
-                        _cache_remove_city(self.server_port, city_id)
-                # Track players so we can pick an AI player for /take
-                elif pid == PID_PLAYER_INFO and parsed_pkt is not None:
-                    pno = parsed_pkt.get("playerno")
-                    if pno is not None:
-                        _cache_feed_player(
-                            self.server_port,
-                            pno,
-                            parsed_pkt.get("name", ""),
-                            bool(parsed_pkt.get("ai_control", False)),
-                        )
-                elif pid == PID_PLAYER_REMOVE and parsed_pkt is not None:
-                    pno = parsed_pkt.get("playerno")
-                    if pno is not None:
-                        _cache_remove_player(self.server_port, pno)
+                elif pid in _PIDS_NEEDING_FULL_PARSE:
+                    # Only parse JSON for the small set of pids that need it.
+                    try:
+                        parsed_pkt = json.loads(text)
+                    except Exception:
+                        parsed_pkt = {}
+                    # Feed CITY_INFO into city cache — always updated, never locked
+                    if pid == PID_CITY_INFO:
+                        city_id = parsed_pkt.get("id")
+                        if city_id is not None:
+                            _cache_feed_city(self.server_port, city_id, text)
+                    # Remove destroyed cities from cache
+                    elif pid == PID_CITY_REMOVE:
+                        city_id = parsed_pkt.get("city_id")
+                        if city_id is not None:
+                            _cache_remove_city(self.server_port, city_id)
+                    # Track players so we can pick an AI player for /take
+                    elif pid == PID_PLAYER_INFO:
+                        pno = parsed_pkt.get("playerno")
+                        if pno is not None:
+                            _cache_feed_player(
+                                self.server_port,
+                                pno,
+                                parsed_pkt.get("name", ""),
+                                bool(parsed_pkt.get("ai_control", False)),
+                            )
+                    elif pid == PID_PLAYER_REMOVE:
+                        pno = parsed_pkt.get("playerno")
+                        if pno is not None:
+                            _cache_remove_player(self.server_port, pno)
 
                 self._send_buffer.append(text)
 
