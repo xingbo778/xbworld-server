@@ -1248,3 +1248,92 @@ class TestTilesCachePrefix:
         names = {p.get("name") for p in data if p.get("pid") == 31}
         assert "Thebes" in names
         assert "Memphis" in names
+
+
+# ---------------------------------------------------------------------------
+# ws_proxy.py — targeted regex extractors for city/player packets
+# ---------------------------------------------------------------------------
+class TestRegexExtractors:
+    """Tests for the lightweight regex patterns replacing json.loads in the hot path."""
+
+    def test_city_id_re(self):
+        from ws_proxy import _CITY_ID_RE
+        m = _CITY_ID_RE.search('{"pid":31,"id":42,"name":"Cairo","pop":3}')
+        assert m is not None and int(m.group(1)) == 42
+
+    def test_city_rem_re(self):
+        from ws_proxy import _CITY_REM_RE
+        m = _CITY_REM_RE.search('{"pid":30,"city_id":99}')
+        assert m is not None and int(m.group(1)) == 99
+
+    def test_player_no_re(self):
+        from ws_proxy import _PLAYER_NO_RE
+        m = _PLAYER_NO_RE.search('{"pid":51,"playerno":2,"name":"Caesar"}')
+        assert m is not None and int(m.group(1)) == 2
+
+    def test_player_name_re(self):
+        from ws_proxy import _PLAYER_NAME_RE
+        m = _PLAYER_NAME_RE.search('{"pid":51,"playerno":2,"name":"Caesar","ai_control":true}')
+        assert m is not None and m.group(1) == "Caesar"
+
+    def test_player_name_re_empty(self):
+        from ws_proxy import _PLAYER_NAME_RE
+        m = _PLAYER_NAME_RE.search('{"pid":51,"playerno":3,"name":""}')
+        assert m is not None and m.group(1) == ""
+
+    def test_player_ai_re_true(self):
+        from ws_proxy import _PLAYER_AI_RE
+        m = _PLAYER_AI_RE.search('{"pid":51,"ai_control":true}')
+        assert m is not None and m.group(1) in ("true", "1")
+
+    def test_player_ai_re_false(self):
+        from ws_proxy import _PLAYER_AI_RE
+        m = _PLAYER_AI_RE.search('{"pid":51,"ai_control":false}')
+        assert m is not None and m.group(1) in ("false", "0")
+
+    def test_player_ai_re_no_match(self):
+        from ws_proxy import _PLAYER_AI_RE
+        assert _PLAYER_AI_RE.search('{"pid":51,"name":"Bob"}') is None
+
+
+class TestRegexExtractorIntegration:
+    """Integration tests: verify city/player cache is populated via regex extraction."""
+
+    PORT = 19030
+
+    def setup_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def teardown_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def test_city_info_cached_via_regex(self):
+        from ws_proxy import _CITY_ID_RE, _cache_feed_city, _tile_cache
+        text = '{"pid":31,"id":7,"name":"Rome","pop":5}'
+        m = _CITY_ID_RE.search(text)
+        assert m is not None
+        _cache_feed_city(self.PORT, int(m.group(1)), text)
+        assert _tile_cache[self.PORT]["cities"][7] == text
+
+    def test_player_info_cached_via_regex(self):
+        from ws_proxy import (
+            _PLAYER_NO_RE, _PLAYER_NAME_RE, _PLAYER_AI_RE,
+            _cache_feed_player, _player_cache,
+        )
+        text = '{"pid":51,"playerno":1,"name":"Augustus","ai_control":true}'
+        _m_no   = _PLAYER_NO_RE.search(text)
+        _m_name = _PLAYER_NAME_RE.search(text)
+        _m_ai   = _PLAYER_AI_RE.search(text)
+        _cache_feed_player(
+            self.PORT,
+            int(_m_no.group(1)),
+            _m_name.group(1) if _m_name else "",
+            _m_ai.group(1) in ("true", "1") if _m_ai else False,
+        )
+        entry = _player_cache[self.PORT][1]
+        assert entry["name"] == "Augustus"
+        assert entry["ai"] is True

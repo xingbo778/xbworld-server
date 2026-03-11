@@ -42,13 +42,23 @@ PID_PLAYER_REMOVE = 50
 # Pids that require a full json.loads in the server reader hot-path.
 # All other pids (MAP_INFO, TILE_INFO, PROCESSING_STARTED/FINISHED, …) only
 # need the pid value, which is extracted cheaply by regex.
-_PIDS_NEEDING_FULL_PARSE = frozenset([
+# Pids that need targeted field extraction in the server reader hot-path.
+_PIDS_NEEDING_EXTRACT = frozenset([
     PID_CITY_INFO, PID_CITY_REMOVE, PID_PLAYER_INFO, PID_PLAYER_REMOVE,
 ])
 
 # Fast pid extraction without full JSON parse.  Pattern matches the very
 # first "pid" key in the freeciv JSON frame, which is always at the start.
 _PID_RE = re.compile(r'"pid"\s*:\s*(-?\d+)')
+
+# Targeted field extractors — avoid json.loads for city/player packets.
+# These rely on freeciv's compact JSON format where integer fields appear as
+# "key":value (no spaces around colon, integer value, no string quoting).
+_CITY_ID_RE    = re.compile(r'"id"\s*:\s*(\d+)')
+_CITY_REM_RE   = re.compile(r'"city_id"\s*:\s*(\d+)')
+_PLAYER_NO_RE  = re.compile(r'"playerno"\s*:\s*(\d+)')
+_PLAYER_NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
+_PLAYER_AI_RE  = re.compile(r'"ai_control"\s*:\s*(true|false|1|0)')
 
 _tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, cities, locked, tiles_prefix}
 
@@ -313,36 +323,34 @@ class CivBridge:
                 # call + dict lookup on every tile packet for late-joining observers.
                 if (pid == PID_MAP_INFO or pid == PID_TILE_INFO) and not self._tile_cache_locked:
                     _cache_feed_raw(self.server_port, pid, text)
-                elif pid in _PIDS_NEEDING_FULL_PARSE:
-                    # Only parse JSON for the small set of pids that need it.
-                    try:
-                        parsed_pkt = json.loads(text)
-                    except Exception:
-                        parsed_pkt = {}
+                elif pid in _PIDS_NEEDING_EXTRACT:
+                    # Use targeted regex extractors instead of full json.loads.
                     # Feed CITY_INFO into city cache — always updated, never locked
                     if pid == PID_CITY_INFO:
-                        city_id = parsed_pkt.get("id")
-                        if city_id is not None:
-                            _cache_feed_city(self.server_port, city_id, text)
+                        _m = _CITY_ID_RE.search(text)
+                        if _m:
+                            _cache_feed_city(self.server_port, int(_m.group(1)), text)
                     # Remove destroyed cities from cache
                     elif pid == PID_CITY_REMOVE:
-                        city_id = parsed_pkt.get("city_id")
-                        if city_id is not None:
-                            _cache_remove_city(self.server_port, city_id)
+                        _m = _CITY_REM_RE.search(text)
+                        if _m:
+                            _cache_remove_city(self.server_port, int(_m.group(1)))
                     # Track players so we can pick an AI player for /take
                     elif pid == PID_PLAYER_INFO:
-                        pno = parsed_pkt.get("playerno")
-                        if pno is not None:
+                        _m_no = _PLAYER_NO_RE.search(text)
+                        if _m_no:
+                            _m_name = _PLAYER_NAME_RE.search(text)
+                            _m_ai   = _PLAYER_AI_RE.search(text)
                             _cache_feed_player(
                                 self.server_port,
-                                pno,
-                                parsed_pkt.get("name", ""),
-                                bool(parsed_pkt.get("ai_control", False)),
+                                int(_m_no.group(1)),
+                                _m_name.group(1) if _m_name else "",
+                                _m_ai.group(1) in ("true", "1") if _m_ai else False,
                             )
                     elif pid == PID_PLAYER_REMOVE:
-                        pno = parsed_pkt.get("playerno")
-                        if pno is not None:
-                            _cache_remove_player(self.server_port, pno)
+                        _m = _PLAYER_NO_RE.search(text)
+                        if _m:
+                            _cache_remove_player(self.server_port, int(_m.group(1)))
 
                 self._send_buffer.append(text)
 
