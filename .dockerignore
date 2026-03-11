@@ -2,13 +2,6 @@
 .git/
 .gitmodules
 
-# Freeciv C source (submodule) — exclude from build context so Docker always
-# uses the deterministic git-clone path in the Dockerfile instead of the
-# potentially-stale submodule checkout.  freeciv-web.fcproj and other small
-# helper files in freeciv/ are still included.
-freeciv/freeciv/
-freeciv/build/
-
 # Python
 .venv/
 *.pyc
