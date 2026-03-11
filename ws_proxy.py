@@ -454,6 +454,15 @@ class CivBridge:
                                     )
                             continue  # skip normal flush below (already flushed)
 
+                # Flush strategy:
+                # - TILE_INFO during initial dump (not yet locked): batch in buffer;
+                #   PID_PROCESSING_FINISHED will flush the whole dump in one WebSocket frame,
+                #   reducing 5000+ individual frames to 1 during tile sync.
+                # - All other packets (and TILE_INFO after lock): flush immediately for
+                #   low latency during normal gameplay.
+                if pid == PID_TILE_INFO and not _tile_cache_locked:
+                    continue  # accumulate; flushed at PROCESSING_FINISHED
+
                 flush_ok = await self._flush_to_client()
                 if not flush_ok:
                     exit_reason = "flush_to_client failed (WebSocket send error)"
