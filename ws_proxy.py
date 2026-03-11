@@ -310,8 +310,8 @@ class CivBridge:
                     exit_reason = "TCP body read returned None"
                     break
 
-                if body and body[-1] == 0:
-                    body = body[:-1]
+                # body_size > 0 is already checked above, so body is non-empty.
+                body = body[:-1] if body[-1] == 0 else body
 
                 self._tcp_pkt_count += 1
 
