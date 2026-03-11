@@ -489,7 +489,12 @@ class CivBridge:
         """Flush send buffer to WebSocket client. Returns False if send failed."""
         if not self._send_buffer or self._stopped:
             return True
-        packet = f'[{",".join(self._send_buffer)}]'
+        # Fast path for single-packet flushes (common during normal gameplay)
+        # avoids the list-iteration overhead of ",".join().
+        if len(self._send_buffer) == 1:
+            packet = f'[{self._send_buffer[0]}]'
+        else:
+            packet = f'[{",".join(self._send_buffer)}]'
         self._send_buffer.clear()
         try:
             await self.ws.send_text(packet)
