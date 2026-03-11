@@ -79,6 +79,7 @@ project to make the server work with web clients:
 | `e59af74de5` | **perf: hoist obsolescence-turns from per-city to per-improvement in daicity.c** — The `players_iterate` that computes minimum turns until any player researches the obsolescence tech only depends on `pimprove`, not on `pcity`. Moved from inside `adjust_improvement_wants_by_effects()` to the improvement level in `dai_build_adv_adjust()`, reducing O(I×C×P) → O(I×P) per AI player per turn. |
 | `88b8e89719` | **perf: O(P²)→O(P) in adv_data_phase_init allied_with_enemy loop** — Pre-builds `adv_enemies[]` (pplayer's war enemies) before the outer aplayer loop; the inner `players_iterate(check_pl)` is replaced by a scan over this short list plus early `break`, eliminating the O(P²) pattern in the advisor diplomacy init. |
 | `044428e231` | **perf: O(P²)→O(P) in dai_data_phase_begin ai_dip_intel loop** — Pre-builds `ddat_enemies[]` and `ddat_allies[]` for pplayer before the outer aplayer loop; three inner field assignments replaced by targeted scans over these small lists (0–3 entries typical), reducing total work from O(P²) to O(P) per pplayer per turn. |
+| `5f8d496b88` | **perf: hoist has_handicap() out of EFT_GAIN_AI_LOVE players_iterate loop in daieffects.c** — `has_handicap(pplayer, H_DEFENSIVE)` is pplayer-constant; calling it once per AI player wasted O(P) calls per `dai_effect_value()` invocation. Pre-compute `per_ai` once, count `n_ai` in one pass, then `v += n_ai * per_ai`. |
 
 ## Known Issues in C Code
 
