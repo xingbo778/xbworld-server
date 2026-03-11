@@ -321,12 +321,21 @@ class CivBridge:
                     logger.error("[proxy:%s] UTF-8 decode error", self.username)
                     continue
 
-                # Extract pid cheaply with a regex — avoids a full json.loads
-                # for every packet.  TILE_INFO dominates during initial sync
-                # (thousands of packets) and only needs the pid value.
-                # Full parsing is deferred to the specific pids that need it.
-                _m = _PID_RE.search(text)
-                pid = int(_m.group(1)) if _m else None
+                # Extract pid: Freeciv packets always start with {"pid":N,...
+                # text.find(',', 6) is a C-level scan — faster than a regex
+                # engine for thousands of TILE_INFO packets during initial sync.
+                # int() accepts leading/trailing whitespace so '{"pid": 31,...'
+                # works correctly.  Regex fallback handles malformed packets.
+                _comma = text.find(',', 6)
+                if _comma > 6:
+                    try:
+                        pid = int(text[6:_comma])
+                    except ValueError:
+                        _m = _PID_RE.search(text)
+                        pid = int(_m.group(1)) if _m else None
+                else:
+                    _m = _PID_RE.search(text)
+                    pid = int(_m.group(1)) if _m else None
 
                 # Feed MAP_INFO and TILE_INFO into tile cache (locked after first batch).
                 # Skip the call once _tile_cache_locked is set to avoid a function
