@@ -39,13 +39,13 @@ PID_CITY_REMOVE = 30
 PID_PLAYER_INFO = 51
 PID_PLAYER_REMOVE = 50
 
-# Pids that require a full json.loads in the server reader hot-path.
-# All other pids (MAP_INFO, TILE_INFO, PROCESSING_STARTED/FINISHED, …) only
-# need the pid value, which is extracted cheaply by regex.
-# Pids that need targeted field extraction in the server reader hot-path.
-_PIDS_NEEDING_EXTRACT = frozenset([
-    PID_CITY_INFO, PID_CITY_REMOVE, PID_PLAYER_INFO, PID_PLAYER_REMOVE,
-])
+# Boolean lookup table for pids that need targeted field extraction.
+# Replaces frozenset (requires hashing) with a direct array index — O(1)
+# with no hash computation.  Freeciv pid values are always small non-negative
+# integers; size 256 covers all currently-defined pids with ample headroom.
+_PIDS_NEEDING_EXTRACT: list[bool] = [False] * 256
+for _p in (PID_CITY_INFO, PID_CITY_REMOVE, PID_PLAYER_INFO, PID_PLAYER_REMOVE):
+    _PIDS_NEEDING_EXTRACT[_p] = True
 
 # Fast pid extraction without full JSON parse.  Pattern matches the very
 # first "pid" key in the freeciv JSON frame, which is always at the start.
@@ -360,7 +360,7 @@ class CivBridge:
                 # without evaluating the pid comparisons on every subsequent packet.
                 if not _tile_cache_locked and (pid == PID_MAP_INFO or pid == PID_TILE_INFO):
                     _cache_feed_raw(server_port, pid, text)
-                elif pid in _PIDS_NEEDING_EXTRACT:
+                elif pid is not None and _PIDS_NEEDING_EXTRACT[pid]:
                     # Use targeted regex extractors instead of full json.loads.
                     # Feed CITY_INFO into city cache — always updated, never locked
                     if pid == PID_CITY_INFO:
