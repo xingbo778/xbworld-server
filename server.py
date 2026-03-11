@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# deploy-probe: c6e6161
 """
 XBWorld Game Server — freeciv engine + WebSocket proxy.
 
