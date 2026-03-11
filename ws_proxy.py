@@ -62,6 +62,8 @@ _PLAYER_AI_RE  = re.compile(r'"ai_control"\s*:\s*(true|false|1|0)')
 
 _tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, cities, locked, tiles_prefix}
 
+_USERNAME_RE = re.compile(r"[a-z][a-z0-9]*")
+
 # Per-port player registry used to pick an AI player for the /take command.
 # Keyed by (server_port, playerno); value is {"name": str, "ai": bool}.
 _player_cache: dict[int, dict[int, dict]] = {}
@@ -215,7 +217,8 @@ def cache_clear_port(port: int) -> None:
 def validate_username(name: str) -> bool:
     if not name or len(name) <= 2 or len(name) >= 32:
         return False
-    return name.lower() != "pbem" and re.fullmatch(r"[a-z][a-z0-9]*", name.lower()) is not None
+    lower = name.lower()
+    return lower != "pbem" and _USERNAME_RE.fullmatch(lower) is not None
 
 
 class CivBridge:
