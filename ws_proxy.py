@@ -292,6 +292,13 @@ class CivBridge:
     async def _server_reader_loop(self):
         """Read packets from freeciv-server TCP and forward to WebSocket client."""
         exit_reason = "unknown"
+        # Cache hot-path attributes as locals so CPython uses LOAD_FAST instead
+        # of LOAD_FAST+LOAD_ATTR on every iteration.  server_port is immutable;
+        # _tile_cache_locked starts False and only ever flips to True, so we
+        # can keep a local mirror and sync back to the instance when it changes.
+        server_port = self.server_port
+        buf_append = self._send_buffer.append
+        _tile_cache_locked = False  # mirrors self._tile_cache_locked
         try:
             while not self._stopped and self._reader:
                 header_data = await self._read_exact(2)
@@ -340,20 +347,20 @@ class CivBridge:
                 # Feed MAP_INFO and TILE_INFO into tile cache (locked after first batch).
                 # Skip the call once _tile_cache_locked is set to avoid a function
                 # call + dict lookup on every tile packet for late-joining observers.
-                if (pid == PID_MAP_INFO or pid == PID_TILE_INFO) and not self._tile_cache_locked:
-                    _cache_feed_raw(self.server_port, pid, text)
+                if (pid == PID_MAP_INFO or pid == PID_TILE_INFO) and not _tile_cache_locked:
+                    _cache_feed_raw(server_port, pid, text)
                 elif pid in _PIDS_NEEDING_EXTRACT:
                     # Use targeted regex extractors instead of full json.loads.
                     # Feed CITY_INFO into city cache — always updated, never locked
                     if pid == PID_CITY_INFO:
                         _m = _CITY_ID_RE.search(text)
                         if _m:
-                            _cache_feed_city(self.server_port, int(_m.group(1)), text)
+                            _cache_feed_city(server_port, int(_m.group(1)), text)
                     # Remove destroyed cities from cache
                     elif pid == PID_CITY_REMOVE:
                         _m = _CITY_REM_RE.search(text)
                         if _m:
-                            _cache_remove_city(self.server_port, int(_m.group(1)))
+                            _cache_remove_city(server_port, int(_m.group(1)))
                     # Track players so we can pick an AI player for /take
                     elif pid == PID_PLAYER_INFO:
                         _m_no = _PLAYER_NO_RE.search(text)
@@ -361,7 +368,7 @@ class CivBridge:
                             _m_name = _PLAYER_NAME_RE.search(text)
                             _m_ai   = _PLAYER_AI_RE.search(text)
                             _cache_feed_player(
-                                self.server_port,
+                                server_port,
                                 int(_m_no.group(1)),
                                 _m_name.group(1) if _m_name else "",
                                 _m_ai.group(1) in ("true", "1") if _m_ai else False,
@@ -369,9 +376,9 @@ class CivBridge:
                     elif pid == PID_PLAYER_REMOVE:
                         _m = _PLAYER_NO_RE.search(text)
                         if _m:
-                            _cache_remove_player(self.server_port, int(_m.group(1)))
+                            _cache_remove_player(server_port, int(_m.group(1)))
 
-                self._send_buffer.append(text)
+                buf_append(text)
 
                 if pid == PID_PROCESSING_FINISHED:
                     self._processing_count += 1
@@ -379,23 +386,26 @@ class CivBridge:
                     # True  → tile cache was already populated by a previous connection
                     #         → this connection is a late-joining observer.
                     # False → this connection is the first one (host / game starter).
-                    was_already_locked = _tile_cache.get(self.server_port, {}).get("locked", False)
+                    was_already_locked = _tile_cache.get(server_port, {}).get("locked", False)
                     # Lock the tile portion of the cache after the first full batch.
-                    _cache_lock(self.server_port)
+                    _cache_lock(server_port)
                     # Mirror the locked state locally so future tile packets skip
                     # the _cache_feed_raw function call entirely.
-                    if not self._tile_cache_locked:
-                        self._tile_cache_locked = _tile_cache.get(self.server_port, {}).get("locked", False)
+                    if not _tile_cache_locked:
+                        new_locked = _tile_cache.get(server_port, {}).get("locked", False)
+                        if new_locked:
+                            _tile_cache_locked = True
+                            self._tile_cache_locked = True
                     # Inject cached tiles+cities on the FIRST processing_finished.
                     if not self._tile_cache_injected:
-                        replay = _cache_get_replay(self.server_port)
+                        replay = _cache_get_replay(server_port)
                         if replay:
                             self._tile_cache_injected = True
-                            _cache_snap = _tile_cache.get(self.server_port, {})
+                            _cache_snap = _tile_cache.get(server_port, {})
                             logger.info(
                                 "[proxy:%s] Injecting cached tile+city data "
                                 "(port=%d, tiles=%d, cities=%d)",
-                                self.username, self.server_port,
+                                self.username, server_port,
                                 len(_cache_snap.get("tiles", [])),
                                 len(_cache_snap.get("cities", {})),
                             )
@@ -416,7 +426,7 @@ class CivBridge:
                             # the browser's own 3-second delayed /take, giving the client
                             # city data sooner.  The browser's subsequent /take is a no-op.
                             if was_already_locked and not self._take_sent:
-                                ai_name = _cache_get_ai_player_name(self.server_port)
+                                ai_name = _cache_get_ai_player_name(server_port)
                                 if ai_name:
                                     self._take_sent = True
                                     take_pkt = json.dumps({"pid": 26, "message": f"/take {ai_name}"})
@@ -424,13 +434,13 @@ class CivBridge:
                                     logger.info(
                                         "[proxy:%s] Sent /take %s to trigger city resync "
                                         "(port=%d)",
-                                        self.username, ai_name, self.server_port,
+                                        self.username, ai_name, server_port,
                                     )
                                 else:
                                     logger.warning(
                                         "[proxy:%s] Late observer but no AI player name cached yet "
                                         "(port=%d) — skipping /take; browser JS will handle it",
-                                        self.username, self.server_port,
+                                        self.username, server_port,
                                     )
                             continue  # skip normal flush below (already flushed)
 
