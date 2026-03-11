@@ -215,6 +215,7 @@ class CivBridge:
         self._tile_cache_injected = False  # whether we've replayed cached tiles
         self._processing_count = 0         # count of PROCESSING_FINISHED seen
         self._take_sent = False            # whether we've sent /take to trigger city resync
+        self._tile_cache_locked = False    # local flag: skip _cache_feed_raw once locked
 
     async def connect_to_server(self, login_packet: str) -> bool:
         logger.info("[proxy:%s] Connecting to civserver at 127.0.0.1:%d", self.username, self.server_port)
@@ -307,8 +308,10 @@ class CivBridge:
                 _m = _PID_RE.search(text)
                 pid = int(_m.group(1)) if _m else None
 
-                # Feed MAP_INFO and TILE_INFO into tile cache (locked after first batch)
-                if pid == PID_MAP_INFO or pid == PID_TILE_INFO:
+                # Feed MAP_INFO and TILE_INFO into tile cache (locked after first batch).
+                # Skip the call once _tile_cache_locked is set to avoid a function
+                # call + dict lookup on every tile packet for late-joining observers.
+                if (pid == PID_MAP_INFO or pid == PID_TILE_INFO) and not self._tile_cache_locked:
                     _cache_feed_raw(self.server_port, pid, text)
                 elif pid in _PIDS_NEEDING_FULL_PARSE:
                     # Only parse JSON for the small set of pids that need it.
@@ -352,6 +355,10 @@ class CivBridge:
                     was_already_locked = _tile_cache.get(self.server_port, {}).get("locked", False)
                     # Lock the tile portion of the cache after the first full batch.
                     _cache_lock(self.server_port)
+                    # Mirror the locked state locally so future tile packets skip
+                    # the _cache_feed_raw function call entirely.
+                    if not self._tile_cache_locked:
+                        self._tile_cache_locked = _tile_cache.get(self.server_port, {}).get("locked", False)
                     # Inject cached tiles+cities on the FIRST processing_finished.
                     if not self._tile_cache_injected:
                         replay = _cache_get_replay(self.server_port)
