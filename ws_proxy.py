@@ -178,6 +178,18 @@ def _cache_get_replay(server_port: int) -> Optional[str]:
     return "[" + prefix + ',{"pid":1}]'
 
 
+def cache_clear_port(port: int) -> None:
+    """Remove all cached state for a game server port.
+
+    Must be called when a freeciv-server process is killed or restarted so
+    that the next connection on the same port does not receive stale tile,
+    city, or player data from the previous game session.
+    """
+    _tile_cache.pop(port, None)
+    _player_cache.pop(port, None)
+    logger.info("[tile-cache:%d] cache cleared (server stopped)", port)
+
+
 def validate_username(name: str) -> bool:
     if not name or len(name) <= 2 or len(name) >= 32:
         return False

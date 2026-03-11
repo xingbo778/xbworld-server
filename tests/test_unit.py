@@ -588,6 +588,75 @@ class _MockWriter:
 # ws_proxy.py — city cache (_cache_feed_city / _cache_remove_city)
 # ---------------------------------------------------------------------------
 
+class TestCacheClearPort:
+    """Tests for cache_clear_port() — prevents stale data on server restart."""
+
+    PORT = 19009
+
+    def setup_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def teardown_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def test_clears_tile_cache(self):
+        from ws_proxy import cache_clear_port, _tile_cache, _cache_feed_raw, _cache_lock
+        _cache_feed_raw(self.PORT, 17, '{"pid":17}')
+        _cache_feed_raw(self.PORT, 15, '{"pid":15}')
+        _cache_lock(self.PORT)
+        assert self.PORT in _tile_cache
+        cache_clear_port(self.PORT)
+        assert self.PORT not in _tile_cache
+
+    def test_clears_player_cache(self):
+        from ws_proxy import cache_clear_port, _player_cache, _cache_feed_player
+        _cache_feed_player(self.PORT, 0, "AiOne", True)
+        assert self.PORT in _player_cache
+        cache_clear_port(self.PORT)
+        assert self.PORT not in _player_cache
+
+    def test_clears_both_caches_together(self):
+        from ws_proxy import (cache_clear_port, _tile_cache, _player_cache,
+                               _cache_feed_raw, _cache_feed_player)
+        _cache_feed_raw(self.PORT, 17, '{"pid":17}')
+        _cache_feed_player(self.PORT, 0, "AiOne", True)
+        cache_clear_port(self.PORT)
+        assert self.PORT not in _tile_cache
+        assert self.PORT not in _player_cache
+
+    def test_safe_when_port_not_cached(self):
+        """Clearing a port with no cache should not raise."""
+        from ws_proxy import cache_clear_port
+        cache_clear_port(99999)  # no entry — must not raise
+
+    def test_new_data_accepted_after_clear(self):
+        """After clear, fresh tile data from a restarted server is accepted."""
+        from ws_proxy import (cache_clear_port, _cache_feed_raw,
+                               _cache_lock, _cache_get_replay, _tile_cache)
+        # Simulate old locked cache from previous game
+        _tile_cache[self.PORT] = {
+            "map_info": '{"pid":17,"xsize":5}',
+            "tiles":    ['{"pid":15,"old":true}'],
+            "cities":   {},
+            "locked":   True,
+            "tiles_prefix": '{"pid":0},{"pid":17,"xsize":5},{"pid":15,"old":true}',
+        }
+        cache_clear_port(self.PORT)
+        # Simulate fresh tiles from restarted server
+        _cache_feed_raw(self.PORT, 17, '{"pid":17,"xsize":10}')
+        _cache_feed_raw(self.PORT, 15, '{"pid":15,"new":true}')
+        _cache_lock(self.PORT)
+        replay = _cache_get_replay(self.PORT)
+        assert replay is not None
+        data = json.loads(replay)
+        map_pkt = next(p for p in data if p.get("pid") == 17)
+        assert map_pkt.get("xsize") == 10  # new data, not old
+
+
 class TestCityCache:
     """Tests for the per-port city cache that backs observer replay."""
 

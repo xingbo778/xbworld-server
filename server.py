@@ -132,6 +132,13 @@ class ServerManager:
                 log_fh.close()
             except Exception:
                 pass
+        # Clear stale tile/city/player cache so a restarted server on this
+        # port does not replay data from the previous game to new observers.
+        try:
+            from ws_proxy import cache_clear_port
+            cache_clear_port(port)
+        except Exception as e:
+            logger.warning("Failed to clear ws_proxy cache for port %d: %s", port, e)
 
     def kill_all(self):
         for port in list(self._servers.keys()):
@@ -334,15 +341,12 @@ async def api_servers():
 async def api_game_restart():
     """Kill all running games and start a fresh singleplayer game.
     Used to warm up the tile cache when connecting to a mid-game server."""
-    from ws_proxy import _tile_cache
     status = server_mgr.status()
     for port in list(status.get("ports", [])):
         try:
-            server_mgr.kill_game(port)
+            server_mgr.kill_game(port)  # also clears ws_proxy cache for this port
         except Exception as e:
             logger.warning("Failed to kill game on port %d: %s", port, e)
-    # Clear stale tile cache
-    _tile_cache.clear()
     # Start a fresh singleplayer game
     try:
         port = server_mgr.spawn_game("singleplayer")
