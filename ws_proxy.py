@@ -156,15 +156,19 @@ def _cache_get_ai_player_name(server_port: int) -> Optional[str]:
     return fallback
 
 
-def _cache_lock(server_port: int) -> None:
+def _cache_lock(server_port: int) -> bool:
     """Lock the tile portion of the cache (no more MAP_INFO / TILE_INFO updates).
 
     City data continues to be updated after locking — only tiles are frozen.
     Pre-computes the immutable tiles prefix string so _cache_get_replay() only
     needs to append the (smaller, dynamic) city list on each observer join.
+
+    Returns True if the cache was just locked by this call, False otherwise
+    (already locked or insufficient data).  The caller can use the return value
+    to update its local mirror without a second dict lookup.
     """
     cache = _tile_cache.get(server_port)
-    if cache and cache.get("map_info") and cache.get("tiles"):
+    if cache and not cache.get("locked") and cache.get("map_info") and cache.get("tiles"):
         cache["locked"] = True
         # Build the invariant part of the replay once: PROCESSING_STARTED +
         # MAP_INFO + all TILE_INFO packets, joined ready for embedding in [...]
@@ -174,6 +178,8 @@ def _cache_lock(server_port: int) -> None:
         )
         logger.info("[tile-cache:%d] locked (%d tiles, %d cities so far)",
                     server_port, len(cache["tiles"]), len(cache.get("cities", {})))
+        return True
+    return False
 
 
 def _cache_get_replay(server_port: int) -> Optional[str]:
@@ -410,14 +416,15 @@ class CivBridge:
                     # True  → tile cache was already populated by a previous connection
                     #         → this connection is a late-joining observer.
                     # False → this connection is the first one (host / game starter).
-                    was_already_locked = _tile_cache.get(server_port, {}).get("locked", False)
+                    # Check if cache was already locked by a previous connection
+                    # BEFORE attempting to lock it ourselves.  Use local mirror
+                    # first (O(1) bool test) before falling back to dict lookup.
+                    was_already_locked = _tile_cache_locked or \
+                        _tile_cache.get(server_port, {}).get("locked", False)
                     # Lock the tile portion of the cache after the first full batch.
-                    _cache_lock(server_port)
-                    # Mirror the locked state locally so future tile packets skip
-                    # the _cache_feed_raw function call entirely.
+                    # _cache_lock() returns True only when it actually performed the lock.
                     if not _tile_cache_locked:
-                        new_locked = _tile_cache.get(server_port, {}).get("locked", False)
-                        if new_locked:
+                        if _cache_lock(server_port) or was_already_locked:
                             _tile_cache_locked = True
                             self._tile_cache_locked = True
                     # Inject cached tiles+cities for late-joining observers only.
