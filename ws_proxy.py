@@ -142,17 +142,18 @@ def _cache_get_ai_player_name(server_port: int) -> Optional[str]:
       1. prefer a player flagged ai_control=True
       2. fall back to the first player with any non-empty name
     Returns None when no suitable player is known yet.
+
+    Single-pass implementation: records the first named player as a fallback
+    while scanning for an AI-controlled one, avoiding a second full iteration.
     """
     players = _player_cache.get(server_port, {})
-    # Prefer an AI-controlled player (matches PLRF_AI flag check in the JS)
+    fallback: Optional[str] = None
     for entry in players.values():
         if entry["ai"] and entry["name"]:
             return entry["name"]
-    # Fallback: first player with a name (same fallback as JS)
-    for entry in players.values():
-        if entry["name"]:
-            return entry["name"]
-    return None
+        if fallback is None and entry["name"]:
+            fallback = entry["name"]
+    return fallback
 
 
 def _cache_lock(server_port: int) -> None:
@@ -419,53 +420,63 @@ class CivBridge:
                         if new_locked:
                             _tile_cache_locked = True
                             self._tile_cache_locked = True
-                    # Inject cached tiles+cities on the FIRST processing_finished.
+                    # Inject cached tiles+cities for late-joining observers only.
+                    #
+                    # was_already_locked == True  → tile cache was fully populated by a
+                    #   previous connection before this one joined.  This connection is a
+                    #   late observer: the server will NOT send a full tile dump, so we
+                    #   replay the cached state here.
+                    # was_already_locked == False → this connection IS the one that
+                    #   populated the cache.  It already received every tile/map packet
+                    #   through the normal buffer → flush path above; sending the replay
+                    #   again would duplicate all tile data over the WebSocket.
                     if not self._tile_cache_injected:
-                        replay = _cache_get_replay(server_port)
-                        if replay:
-                            self._tile_cache_injected = True
-                            _cache_snap = _tile_cache.get(server_port, {})
-                            logger.info(
-                                "[proxy:%s] Injecting cached tile+city data "
-                                "(port=%d, tiles=%d, cities=%d)",
-                                username, server_port,
-                                len(_cache_snap.get("tiles", [])),
-                                len(_cache_snap.get("cities", {})),
-                            )
-                            # Flush current buffer first, then inject.
-                            flush_ok = await self._flush_to_client()
-                            if not flush_ok:
-                                break
-                            try:
-                                await self.ws.send_text(replay)
-                                self._ws_send_count += 1
-                            except Exception as e:
-                                logger.error("[proxy:%s] Failed to send tile cache: %s", username, e)
-                                self._stopped = True
-                                break
-                            # For late-joining observers, proactively send /take <ai_player>
-                            # so freeciv-server immediately pushes fresh CITY_INFO packets.
-                            # This mirrors clientCore.ts::requestObserveGame but fires before
-                            # the browser's own 3-second delayed /take, giving the client
-                            # city data sooner.  The browser's subsequent /take is a no-op.
-                            if was_already_locked and not self._take_sent:
-                                ai_name = _cache_get_ai_player_name(server_port)
-                                if ai_name:
-                                    self._take_sent = True
-                                    take_pkt = json.dumps({"pid": 26, "message": f"/take {ai_name}"})
-                                    await self._send_to_server(take_pkt)
-                                    logger.info(
-                                        "[proxy:%s] Sent /take %s to trigger city resync "
-                                        "(port=%d)",
-                                        username, ai_name, server_port,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "[proxy:%s] Late observer but no AI player name cached yet "
-                                        "(port=%d) — skipping /take; browser JS will handle it",
-                                        username, server_port,
-                                    )
-                            continue  # skip normal flush below (already flushed)
+                        self._tile_cache_injected = True  # prevent repeat injection
+                        if was_already_locked:
+                            replay = _cache_get_replay(server_port)
+                            if replay:
+                                _cache_snap = _tile_cache.get(server_port, {})
+                                logger.info(
+                                    "[proxy:%s] Injecting cached tile+city data "
+                                    "(port=%d, tiles=%d, cities=%d)",
+                                    username, server_port,
+                                    len(_cache_snap.get("tiles", [])),
+                                    len(_cache_snap.get("cities", {})),
+                                )
+                                # Flush current buffer first, then inject.
+                                flush_ok = await self._flush_to_client()
+                                if not flush_ok:
+                                    break
+                                try:
+                                    await self.ws.send_text(replay)
+                                    self._ws_send_count += 1
+                                except Exception as e:
+                                    logger.error("[proxy:%s] Failed to send tile cache: %s", username, e)
+                                    self._stopped = True
+                                    break
+                                # Proactively send /take <ai_player> so freeciv-server
+                                # immediately pushes fresh CITY_INFO packets.  This mirrors
+                                # clientCore.ts::requestObserveGame but fires before the
+                                # browser's own 3-second delayed /take, giving city data
+                                # sooner.  The browser's subsequent /take is a no-op.
+                                if not self._take_sent:
+                                    ai_name = _cache_get_ai_player_name(server_port)
+                                    if ai_name:
+                                        self._take_sent = True
+                                        take_pkt = json.dumps({"pid": 26, "message": f"/take {ai_name}"})
+                                        await self._send_to_server(take_pkt)
+                                        logger.info(
+                                            "[proxy:%s] Sent /take %s to trigger city resync "
+                                            "(port=%d)",
+                                            username, ai_name, server_port,
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "[proxy:%s] Late observer but no AI player name cached yet "
+                                            "(port=%d) — skipping /take; browser JS will handle it",
+                                            username, server_port,
+                                        )
+                                continue  # skip normal flush below (already flushed)
 
                 # Flush strategy:
                 # - TILE_INFO during initial dump (not yet locked): batch in buffer;
