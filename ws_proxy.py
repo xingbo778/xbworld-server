@@ -111,7 +111,8 @@ def _cache_feed_city(server_port: int, city_id: int, packet_json: str) -> None:
     if cache is None:
         cache = {"map_info": None, "tiles": [], "cities": {}, "locked": False}
         _tile_cache[server_port] = cache
-    cache.setdefault("cities", {})[city_id] = packet_json
+    # "cities" is always initialised to {} in new caches; no setdefault needed.
+    cache["cities"][city_id] = packet_json
     cache.pop("cities_joined", None)  # invalidate lazy join cache
 
 
@@ -119,7 +120,7 @@ def _cache_remove_city(server_port: int, city_id: int) -> None:
     """Remove a city from the cache when it is destroyed."""
     cache = _tile_cache.get(server_port)
     if cache:
-        cache.get("cities", {}).pop(city_id, None)
+        cache["cities"].pop(city_id, None)
         cache.pop("cities_joined", None)  # invalidate lazy join cache
 
 
