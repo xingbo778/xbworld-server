@@ -25,9 +25,9 @@ class TestConfig:
             MINOR_VERSION, PATCH_VERSION, MAX_MESSAGES_KEPT,
         )
         assert isinstance(SERVER_PORT, int) and SERVER_PORT > 0
-        assert FREECIV_VERSION == "+Freeciv.Web.Devel-3.3"
+        assert FREECIV_VERSION == "+Freeciv.Web.Devel-3.4"
         assert MAJOR_VERSION == 3
-        assert MINOR_VERSION == 1
+        assert MINOR_VERSION == 3
         assert PATCH_VERSION == 90
         assert MAX_MESSAGES_KEPT == 200
 
@@ -525,3 +525,521 @@ class TestTcpFraming:
             header = struct.pack(">H", payload_len + 3)
             (decoded_size,) = struct.unpack(">H", header)
             assert decoded_size == payload_len + 3
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by ws_proxy cache + CivBridge tests
+# ---------------------------------------------------------------------------
+
+def _make_tcp_frame(payload: dict) -> bytes:
+    """Encode a dict as a freeciv TCP frame: 2-byte length + JSON + NUL."""
+    text = json.dumps(payload).encode("utf-8")
+    header = struct.pack(">H", len(text) + 3)
+    return header + text + b"\0"
+
+
+class _MockReader:
+    """Fake asyncio.StreamReader that serves pre-built frames then raises EOF."""
+
+    def __init__(self, *frames: bytes):
+        self._data = b"".join(frames)
+        self._pos = 0
+
+    async def readexactly(self, n: int) -> bytes:
+        if self._pos + n > len(self._data):
+            raise asyncio.IncompleteReadError(
+                partial=self._data[self._pos:], expected=n
+            )
+        chunk = self._data[self._pos : self._pos + n]
+        self._pos += n
+        return chunk
+
+
+class _MockWS:
+    """Fake FastAPI WebSocket that captures sent text."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(text)
+
+
+class _MockWriter:
+    """Fake asyncio.StreamWriter that captures written bytes."""
+
+    def __init__(self):
+        self.written = b""
+
+    def write(self, data: bytes) -> None:
+        self.written += data
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# ws_proxy.py — city cache (_cache_feed_city / _cache_remove_city)
+# ---------------------------------------------------------------------------
+
+class TestCityCache:
+    """Tests for the per-port city cache that backs observer replay."""
+
+    PORT = 19010
+
+    def setup_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+
+    def teardown_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+
+    def test_feed_city_creates_entry(self):
+        from ws_proxy import _cache_feed_city, _tile_cache
+        _cache_feed_city(self.PORT, 10, '{"pid":31,"id":10,"name":"Rome"}')
+        assert 10 in _tile_cache[self.PORT]["cities"]
+        assert "Rome" in _tile_cache[self.PORT]["cities"][10]
+
+    def test_feed_city_overwrites_stale_entry(self):
+        """Second CITY_INFO for same ID replaces the first."""
+        from ws_proxy import _cache_feed_city, _tile_cache
+        _cache_feed_city(self.PORT, 10, '{"pid":31,"id":10,"name":"Rome"}')
+        _cache_feed_city(self.PORT, 10, '{"pid":31,"id":10,"name":"Roma"}')
+        assert "Roma" in _tile_cache[self.PORT]["cities"][10]
+        assert "Rome" not in _tile_cache[self.PORT]["cities"][10]
+
+    def test_feed_city_multiple_ids(self):
+        from ws_proxy import _cache_feed_city, _tile_cache
+        _cache_feed_city(self.PORT, 1, '{"pid":31,"id":1}')
+        _cache_feed_city(self.PORT, 2, '{"pid":31,"id":2}')
+        assert len(_tile_cache[self.PORT]["cities"]) == 2
+
+    def test_remove_city_deletes_entry(self):
+        from ws_proxy import _cache_feed_city, _cache_remove_city, _tile_cache
+        _cache_feed_city(self.PORT, 10, '{"pid":31,"id":10}')
+        _cache_remove_city(self.PORT, 10)
+        assert 10 not in _tile_cache[self.PORT]["cities"]
+
+    def test_remove_nonexistent_city_is_noop(self):
+        from ws_proxy import _cache_remove_city
+        _cache_remove_city(self.PORT, 9999)  # must not raise
+
+    def test_city_updated_after_tile_cache_locked(self):
+        """City cache keeps updating even after the tile portion is locked."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles": ['{"pid":15}'],
+            "cities": {},
+            "locked": True,  # tiles frozen
+        }
+        ws_proxy._cache_feed_city(self.PORT, 5, '{"pid":31,"id":5,"name":"Athens"}')
+        assert 5 in ws_proxy._tile_cache[self.PORT]["cities"]
+
+    def test_replay_includes_city_packets(self):
+        """_cache_get_replay embeds current city state in the bundle."""
+        from ws_proxy import _cache_feed_city, _cache_get_replay, _tile_cache
+        _tile_cache[self.PORT] = {
+            "map_info": '{"pid":17,"xsize":10}',
+            "tiles": ['{"pid":15,"tile":0}'],
+            "cities": {},
+            "locked": True,
+        }
+        _cache_feed_city(self.PORT, 7, '{"pid":31,"id":7,"name":"Carthage"}')
+        replay = _cache_get_replay(self.PORT)
+        assert replay is not None
+        bundle = json.loads(replay)
+        pids = [p["pid"] for p in bundle]
+        assert 31 in pids  # CITY_INFO present
+        city_pkts = [p for p in bundle if p["pid"] == 31]
+        assert city_pkts[0]["name"] == "Carthage"
+
+    def test_replay_wraps_with_processing_sentinels(self):
+        """Replay bundle starts with PROCESSING_STARTED and ends with PROCESSING_FINISHED."""
+        from ws_proxy import _cache_get_replay, _tile_cache
+        _tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles": ['{"pid":15}'],
+            "cities": {},
+            "locked": True,
+        }
+        bundle = json.loads(_cache_get_replay(self.PORT))
+        assert bundle[0]["pid"] == 0   # PROCESSING_STARTED
+        assert bundle[-1]["pid"] == 1  # PROCESSING_FINISHED
+
+    def test_replay_none_when_no_tiles(self):
+        """No replay is produced if tile cache is still empty."""
+        from ws_proxy import _cache_get_replay, _tile_cache
+        _tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles": [],
+            "cities": {},
+            "locked": False,
+        }
+        assert _cache_get_replay(self.PORT) is None
+
+    def test_replay_city_snapshot_at_call_time(self):
+        """Cities added after locking appear in replay (snapshot is live)."""
+        from ws_proxy import _cache_feed_city, _cache_get_replay, _tile_cache
+        _tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles": ['{"pid":15}'],
+            "cities": {},
+            "locked": True,
+        }
+        _cache_feed_city(self.PORT, 1, '{"pid":31,"id":1,"name":"First"}')
+        first_replay = json.loads(_cache_get_replay(self.PORT))
+        _cache_feed_city(self.PORT, 2, '{"pid":31,"id":2,"name":"Second"}')
+        second_replay = json.loads(_cache_get_replay(self.PORT))
+        first_names  = {p.get("name") for p in first_replay  if p.get("pid") == 31}
+        second_names = {p.get("name") for p in second_replay if p.get("pid") == 31}
+        assert "First"  in first_names
+        assert "Second" not in first_names   # not yet present at first call
+        assert "Second" in second_names      # present at second call
+
+
+# ---------------------------------------------------------------------------
+# ws_proxy.py — player cache (_cache_feed_player / _cache_get_ai_player_name)
+# ---------------------------------------------------------------------------
+
+class TestPlayerCache:
+    """Tests for per-port player registry used to pick the /take target."""
+
+    PORT = 19020
+
+    def setup_method(self):
+        import ws_proxy
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def teardown_method(self):
+        import ws_proxy
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def test_feed_player_stores_entry(self):
+        from ws_proxy import _cache_feed_player, _player_cache
+        _cache_feed_player(self.PORT, 0, "Romans", True)
+        assert _player_cache[self.PORT][0] == {"name": "Romans", "ai": True}
+
+    def test_feed_player_overwrites_on_update(self):
+        from ws_proxy import _cache_feed_player, _player_cache
+        _cache_feed_player(self.PORT, 0, "Romans", True)
+        _cache_feed_player(self.PORT, 0, "Romans", False)  # ai_control changed
+        assert _player_cache[self.PORT][0]["ai"] is False
+
+    def test_remove_player_deletes_entry(self):
+        from ws_proxy import _cache_feed_player, _cache_remove_player, _player_cache
+        _cache_feed_player(self.PORT, 0, "Romans", True)
+        _cache_remove_player(self.PORT, 0)
+        assert 0 not in _player_cache.get(self.PORT, {})
+
+    def test_remove_nonexistent_player_is_noop(self):
+        from ws_proxy import _cache_remove_player
+        _cache_remove_player(self.PORT, 9999)  # must not raise
+
+    def test_get_ai_name_prefers_ai_flag(self):
+        """ai_control=True player takes priority over non-AI player."""
+        from ws_proxy import _cache_feed_player, _cache_get_ai_player_name
+        _cache_feed_player(self.PORT, 0, "HumanPlayer", False)
+        _cache_feed_player(self.PORT, 1, "AiCiv",       True)
+        assert _cache_get_ai_player_name(self.PORT) == "AiCiv"
+
+    def test_get_ai_name_falls_back_to_any_named_player(self):
+        """If no AI player, return first player that has a name."""
+        from ws_proxy import _cache_feed_player, _cache_get_ai_player_name
+        _cache_feed_player(self.PORT, 0, "HumanPlayer", False)
+        assert _cache_get_ai_player_name(self.PORT) == "HumanPlayer"
+
+    def test_get_ai_name_skips_empty_names(self):
+        """Players with empty name strings are not returned."""
+        from ws_proxy import _cache_feed_player, _cache_get_ai_player_name
+        _cache_feed_player(self.PORT, 0, "",       True)   # AI but no name
+        _cache_feed_player(self.PORT, 1, "Romans", True)
+        assert _cache_get_ai_player_name(self.PORT) == "Romans"
+
+    def test_get_ai_name_returns_none_when_empty(self):
+        from ws_proxy import _cache_get_ai_player_name
+        assert _cache_get_ai_player_name(self.PORT) is None
+
+    def test_get_ai_name_returns_none_when_all_names_empty(self):
+        from ws_proxy import _cache_feed_player, _cache_get_ai_player_name
+        _cache_feed_player(self.PORT, 0, "", True)
+        _cache_feed_player(self.PORT, 1, "", False)
+        assert _cache_get_ai_player_name(self.PORT) is None
+
+
+# ---------------------------------------------------------------------------
+# ws_proxy.py — CivBridge observer /take trigger
+# ---------------------------------------------------------------------------
+
+class TestCivBridgeObserverTake:
+    """Tests for the proactive /take sent to late-joining observers.
+
+    These tests exercise _server_reader_loop() end-to-end with mocked
+    WebSocket and TCP connections so that no live server is needed.
+    """
+
+    PORT = 19030
+
+    def setup_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def teardown_method(self):
+        import ws_proxy
+        ws_proxy._tile_cache.pop(self.PORT, None)
+        ws_proxy._player_cache.pop(self.PORT, None)
+
+    def _locked_tile_cache(self):
+        """Return a tile cache dict that appears already locked (prior connection)."""
+        return {
+            "map_info": '{"pid":17,"xsize":10,"ysize":10}',
+            "tiles":    ['{"pid":15,"tile":0}'],
+            "cities":   {},
+            "locked":   True,
+        }
+
+    def _make_bridge(self):
+        import ws_proxy
+        mock_ws     = _MockWS()
+        mock_writer = _MockWriter()
+        bridge = ws_proxy.CivBridge(mock_ws, "observer", self.PORT, "key-test")
+        bridge._writer = mock_writer
+        return bridge, mock_ws, mock_writer
+
+    def _tcp_written_str(self, mock_writer: _MockWriter) -> str:
+        return mock_writer.written.decode("utf-8", errors="ignore")
+
+    # -- unit check on __init__ flag --
+
+    def test_take_sent_flag_initialises_false(self):
+        bridge, _, _ = self._make_bridge()
+        assert bridge._take_sent is False
+
+    # -- /take is sent for late observers --
+
+    @pytest.mark.asyncio
+    async def test_late_observer_sends_take_after_injection(self):
+        """When tile cache was already locked, proxy sends /take <ai> over TCP."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = self._locked_tile_cache()
+        ws_proxy._player_cache[self.PORT] = {
+            0: {"name": "Romans", "ai": True}
+        }
+        bridge, _, mock_writer = self._make_bridge()
+        bridge._reader = _MockReader(_make_tcp_frame({"pid": 1}))  # PROCESSING_FINISHED
+
+        await bridge._server_reader_loop()
+
+        written = self._tcp_written_str(mock_writer)
+        assert "/take Romans" in written, (
+            f"Expected /take Romans in TCP output; got: {written!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_late_observer_take_uses_ai_player_not_human(self):
+        """/take targets the AI player even when a human player is also cached."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = self._locked_tile_cache()
+        ws_proxy._player_cache[self.PORT] = {
+            0: {"name": "HumanSlot", "ai": False},
+            1: {"name": "AiCiv",     "ai": True},
+        }
+        bridge, _, mock_writer = self._make_bridge()
+        bridge._reader = _MockReader(_make_tcp_frame({"pid": 1}))
+
+        await bridge._server_reader_loop()
+
+        written = self._tcp_written_str(mock_writer)
+        assert "/take AiCiv"    in written
+        assert "/take HumanSlot" not in written
+
+    # -- /take is NOT sent for the first (host) connection --
+
+    @pytest.mark.asyncio
+    async def test_first_connection_does_not_send_take(self):
+        """The host connection populates the tile cache — it must not trigger /take."""
+        import ws_proxy
+        # Cache exists but is NOT yet locked (this is the first connection)
+        ws_proxy._tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles":    ['{"pid":15}'],
+            "cities":   {},
+            "locked":   False,
+        }
+        ws_proxy._player_cache[self.PORT] = {0: {"name": "Romans", "ai": True}}
+
+        bridge, _, mock_writer = self._make_bridge()
+        bridge._reader = _MockReader(_make_tcp_frame({"pid": 1}))
+
+        await bridge._server_reader_loop()
+
+        written = self._tcp_written_str(mock_writer)
+        assert "/take" not in written, (
+            f"Expected no /take for first connection; got: {written!r}"
+        )
+
+    # -- idempotency: /take sent exactly once --
+
+    @pytest.mark.asyncio
+    async def test_take_sent_flag_prevents_duplicate(self):
+        """Multiple PROCESSING_FINISHED packets produce exactly one /take."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = self._locked_tile_cache()
+        ws_proxy._player_cache[self.PORT] = {0: {"name": "Romans", "ai": True}}
+
+        bridge, _, mock_writer = self._make_bridge()
+        bridge._reader = _MockReader(
+            _make_tcp_frame({"pid": 1}),   # first  PROCESSING_FINISHED → /take sent
+            _make_tcp_frame({"pid": 1}),   # second PROCESSING_FINISHED → no resend
+        )
+
+        await bridge._server_reader_loop()
+
+        written = self._tcp_written_str(mock_writer)
+        assert written.count("/take Romans") == 1, (
+            f"Expected exactly one /take; got {written.count('/take Romans')} in: {written!r}"
+        )
+
+    # -- graceful degradation when player cache is empty --
+
+    @pytest.mark.asyncio
+    async def test_no_take_when_player_cache_empty(self):
+        """If no player name is cached yet, /take is skipped gracefully."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = self._locked_tile_cache()
+        # _player_cache intentionally left empty
+
+        bridge, _, mock_writer = self._make_bridge()
+        bridge._reader = _MockReader(_make_tcp_frame({"pid": 1}))
+
+        await bridge._server_reader_loop()
+
+        written = self._tcp_written_str(mock_writer)
+        assert "/take" not in written
+
+    # -- PLAYER_INFO packets flowing through the loop populate the registry --
+
+    @pytest.mark.asyncio
+    async def test_player_info_in_stream_populates_cache_and_triggers_take(self):
+        """PLAYER_INFO arriving before PROCESSING_FINISHED is used for /take."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = self._locked_tile_cache()
+        # No player cache pre-seeded — player info arrives in the stream
+
+        bridge, _, mock_writer = self._make_bridge()
+        bridge._reader = _MockReader(
+            _make_tcp_frame(
+                {"pid": 51, "playerno": 0, "name": "Greeks", "ai_control": True}
+            ),
+            _make_tcp_frame({"pid": 1}),   # PROCESSING_FINISHED
+        )
+
+        await bridge._server_reader_loop()
+
+        # Player cache populated
+        players = ws_proxy._player_cache.get(self.PORT, {})
+        assert players.get(0, {}).get("name") == "Greeks"
+
+        # /take used the name from the stream
+        written = self._tcp_written_str(mock_writer)
+        assert "/take Greeks" in written
+
+    @pytest.mark.asyncio
+    async def test_player_remove_in_stream_deletes_from_cache(self):
+        """PLAYER_REMOVE cleans up the player registry."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = self._locked_tile_cache()
+        ws_proxy._player_cache[self.PORT] = {0: {"name": "Romans", "ai": True}}
+
+        bridge, _, _ = self._make_bridge()
+        bridge._reader = _MockReader(
+            _make_tcp_frame({"pid": 50, "playerno": 0}),  # PLAYER_REMOVE
+            _make_tcp_frame({"pid": 1}),
+        )
+
+        await bridge._server_reader_loop()
+
+        players = ws_proxy._player_cache.get(self.PORT, {})
+        assert 0 not in players
+
+    # -- CITY_INFO packets flowing through the loop populate the city cache --
+
+    @pytest.mark.asyncio
+    async def test_city_info_in_stream_populates_city_cache(self):
+        """CITY_INFO packets arriving in the stream update the city cache."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles":    ['{"pid":15}'],
+            "cities":   {},
+            "locked":   False,   # host connection: populates cache
+        }
+
+        bridge, _, _ = self._make_bridge()
+        bridge._reader = _MockReader(
+            _make_tcp_frame({"pid": 31, "id": 5, "name": "Sparta", "owner": 0}),
+            _make_tcp_frame({"pid": 1}),
+        )
+
+        await bridge._server_reader_loop()
+
+        cities = ws_proxy._tile_cache.get(self.PORT, {}).get("cities", {})
+        assert 5 in cities
+        assert "Sparta" in cities[5]
+
+    @pytest.mark.asyncio
+    async def test_city_remove_in_stream_evicts_from_cache(self):
+        """CITY_REMOVE cleans up the city entry."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = {
+            "map_info": '{"pid":17}',
+            "tiles":    ['{"pid":15}'],
+            "cities":   {5: '{"pid":31,"id":5,"name":"Sparta"}'},
+            "locked":   True,
+        }
+
+        bridge, _, _ = self._make_bridge()
+        bridge._reader = _MockReader(
+            _make_tcp_frame({"pid": 30, "city_id": 5}),  # CITY_REMOVE
+            _make_tcp_frame({"pid": 1}),
+        )
+
+        await bridge._server_reader_loop()
+
+        cities = ws_proxy._tile_cache.get(self.PORT, {}).get("cities", {})
+        assert 5 not in cities
+
+    # -- tile+city bundle injected to client WebSocket --
+
+    @pytest.mark.asyncio
+    async def test_injection_bundle_sent_to_websocket(self):
+        """The replay bundle (tiles + cities) is sent to the WebSocket client."""
+        import ws_proxy
+        ws_proxy._tile_cache[self.PORT] = self._locked_tile_cache()
+        ws_proxy._tile_cache[self.PORT]["cities"] = {
+            3: '{"pid":31,"id":3,"name":"Carthage"}'
+        }
+        ws_proxy._player_cache[self.PORT] = {0: {"name": "Romans", "ai": True}}
+
+        bridge, mock_ws, _ = self._make_bridge()
+        bridge._reader = _MockReader(_make_tcp_frame({"pid": 1}))
+
+        await bridge._server_reader_loop()
+
+        # Find the replay bundle (largest sent text, contains pid=31)
+        replay_msg = next(
+            (s for s in mock_ws.sent if '"pid": 31' in s or '"pid":31' in s),
+            None,
+        )
+        assert replay_msg is not None, "Expected a WebSocket message containing CITY_INFO"
+        bundle = json.loads(replay_msg)
+        city_names = [p.get("name") for p in bundle if p.get("pid") == 31]
+        assert "Carthage" in city_names
