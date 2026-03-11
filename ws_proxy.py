@@ -342,14 +342,14 @@ class CivBridge:
                     continue
 
                 # Extract pid: Freeciv packets always start with {"pid":N,...
-                # text.find(',', 6) is a C-level scan — faster than a regex
-                # engine for thousands of TILE_INFO packets during initial sync.
-                # int() accepts leading/trailing whitespace so '{"pid": 31,...'
-                # works correctly.  Regex fallback handles malformed packets.
-                _comma = text.find(',', 6)
-                if _comma > 6:
+                # Fast path: text[7:] starts right after the colon in '{"pid":'.
+                # text.find(',', 7) is a C-level scan; int() strips whitespace so
+                # '{"pid": 31,...' works.  Regex fallback handles edge cases
+                # (no comma = single-field packet like {"pid":0}).
+                _comma = text.find(',', 7)
+                if _comma > 7:
                     try:
-                        pid = int(text[6:_comma])
+                        pid = int(text[7:_comma])
                     except ValueError:
                         _m = _PID_RE.search(text)
                         pid = int(_m.group(1)) if _m else None
