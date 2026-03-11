@@ -81,6 +81,7 @@ project to make the server work with web clients:
 | `044428e231` | **perf: O(P²)→O(P) in dai_data_phase_begin ai_dip_intel loop** — Pre-builds `ddat_enemies[]` and `ddat_allies[]` for pplayer before the outer aplayer loop; three inner field assignments replaced by targeted scans over these small lists (0–3 entries typical), reducing total work from O(P²) to O(P) per pplayer per turn. |
 | `5f8d496b88` | **perf: hoist has_handicap() out of EFT_GAIN_AI_LOVE players_iterate loop in daieffects.c** — `has_handicap(pplayer, H_DEFENSIVE)` is pplayer-constant; calling it once per AI player wasted O(P) calls per `dai_effect_value()` invocation. Pre-compute `per_ai` once, count `n_ai` in one pass, then `v += n_ai * per_ai`. |
 | `4e5c04a5d2` | **perf: merge production_leader and tech_leader scans into one O(P) pass in advdata.c** — `adv_data_phase_init()` ran two consecutive `players_iterate` loops to find the production leader (max score.mfg) and tech leader (max score.techs). Merged into one loop, halving the per-player iteration count for these two max-finding scans. |
+| `c0a721f7a6` | **perf: pre-build hostile player list in find_something_to_kill()** — `find_something_to_kill()` (called per attacking unit per turn) contained two `players_iterate` loops each gated by `POTENTIALLY_HOSTILE_PLAYER` / `pplayers_at_war`. Pre-builds `fstk_hostile[]` in one O(P) pass; both loops then iterate only 1–3 hostile players instead of all P players, eliminating O(P_neutral × 2) filter evaluations per call. |
 
 ## Known Issues in C Code
 
