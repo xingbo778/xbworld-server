@@ -64,6 +64,13 @@ project to make the server work with web clients:
 | *(latest)* | **chore: remove .orig backup files** — Removes 8 `.orig` files (35K lines) left over from the patch workflow. |
 | *(latest)* | **fix: update XBWorld ruleset naming and Lua safety** — Renames "Webperimental" → "XBWorld", fixes typo, standardizes descriptions, adds zero-guards in `script.lua`. |
 
+### 6. Performance Optimizations (XBWorld)
+
+| Commit | Description |
+|--------|-------------|
+| `541f990cbd` | **perf: early-exit O(n²) diplomatic intel loop in daidata.c** — Adds NULL guards and a `break` to the inner `players_iterate` in `dai_data_phase_begin()`, converting the worst-case O(n³) scan (outer player × aplayer × check_pl) to stop as soon as all three `ai_dip_intel` pointer fields are found. Behavior is equivalent: first matching player is stored instead of last, which is equally valid for both boolean and `player_name()` uses in `daidiplomacy.c`. |
+| `2df45a3c57` | **perf: replace select() with epoll on Linux in sernet.c** — On Linux, `server_sniff_all_input()` now uses `epoll_wait()` instead of `fc_select()`. Epoll fd lifecycle: created in `server_open_socket()`, fds added in `server_make_connection()`, removed in `close_connection()`. EPOLLOUT toggled per-connection before each wait; events synthesized into the existing `readfs`/`writefs`/`exceptfs` fd_sets for unchanged dispatch code. Full select() fallback preserved for non-Linux builds. Eliminates O(max_fd) fd_set rebuild on every loop iteration; `epoll_wait()` is O(ready fds). |
+
 ## Known Issues in C Code
 
 These are pre-existing FIXMEs/TODOs in the upstream code that are
