@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import re
-import struct
 import time
 import uuid
 from typing import Optional
@@ -284,7 +283,7 @@ class CivBridge:
             return
         try:
             encoded = message.encode("utf-8")
-            header = struct.pack(">H", len(encoded) + 3)
+            header = (len(encoded) + 3).to_bytes(2, 'big')
             self._writer.write(header + encoded + b"\0")
             await self._writer.drain()
         except Exception as e:
@@ -300,7 +299,7 @@ class CivBridge:
                     exit_reason = "TCP read returned None (connection closed or timeout)"
                     break
 
-                (packet_size,) = struct.unpack(">H", header_data)
+                packet_size = int.from_bytes(header_data, 'big')
                 body_size = packet_size - 2
                 if body_size <= 0 or body_size > 32767:
                     logger.error("[proxy:%s] Invalid packet size %d from server", self.username, body_size)
