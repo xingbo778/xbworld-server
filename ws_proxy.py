@@ -194,8 +194,8 @@ def _cache_get_replay(server_port: int) -> Optional[str]:
         if cities_joined is None:
             cities_joined = ",".join(cities.values())
             cache["cities_joined"] = cities_joined
-        return "[" + prefix + "," + cities_joined + ',{"pid":1}]'
-    return "[" + prefix + ',{"pid":1}]'
+        return f'[{prefix},{cities_joined},{{"pid":1}}]'
+    return f'[{prefix},{{"pid":1}}]'
 
 
 def cache_clear_port(port: int) -> None:
@@ -476,7 +476,7 @@ class CivBridge:
         """Flush send buffer to WebSocket client. Returns False if send failed."""
         if not self._send_buffer or self._stopped:
             return True
-        packet = "[" + ",".join(self._send_buffer) + "]"
+        packet = f'[{",".join(self._send_buffer)}]'
         self._send_buffer.clear()
         try:
             await self.ws.send_text(packet)
