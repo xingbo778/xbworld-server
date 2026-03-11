@@ -10,6 +10,7 @@ Protocol:
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -158,8 +159,9 @@ def _cache_lock(server_port: int) -> None:
         cache["locked"] = True
         # Build the invariant part of the replay once: PROCESSING_STARTED +
         # MAP_INFO + all TILE_INFO packets, joined ready for embedding in [...]
+        # itertools.chain avoids allocating a merged list (tiles can be 5000+).
         cache["tiles_prefix"] = ",".join(
-            ['{"pid":0}', cache["map_info"]] + cache["tiles"]
+            itertools.chain(['{"pid":0}', cache["map_info"]], cache["tiles"])
         )
         logger.info("[tile-cache:%d] locked (%d tiles, %d cities so far)",
                     server_port, len(cache["tiles"]), len(cache.get("cities", {})))
