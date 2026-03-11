@@ -306,6 +306,7 @@ class CivBridge:
         reader = self._reader
         buf_append = self._send_buffer.append
         _tile_cache_locked = False  # mirrors self._tile_cache_locked
+        _tcp_pkt_count = 0          # local counter; synced to self._tcp_pkt_count in finally
         try:
             while not self._stopped and reader:
                 # Inline header read — avoids 2 method calls + self._reader LOAD_ATTR per packet.
@@ -333,13 +334,10 @@ class CivBridge:
                 # body_size > 0 is already checked above, so body is non-empty.
                 body = body[:-1] if body[-1] == 0 else body
 
-                self._tcp_pkt_count += 1
+                _tcp_pkt_count += 1
 
-                try:
-                    text = body.decode("utf-8", errors="ignore")
-                except UnicodeDecodeError:
-                    logger.error("[proxy:%s] UTF-8 decode error", username)
-                    continue
+                # errors="ignore" never raises — try/except is unnecessary overhead.
+                text = body.decode("utf-8", errors="ignore")
 
                 # Extract pid: Freeciv packets always start with {"pid":N,...
                 # Fast path: text[7:] starts right after the colon in '{"pid":'.
@@ -480,6 +478,7 @@ class CivBridge:
             exit_reason = f"exception: {type(e).__name__}: {e}"
             logger.warning("[proxy:%s] Server reader error: %s", username, e)
         finally:
+            self._tcp_pkt_count = _tcp_pkt_count  # sync local counter back to instance
             logger.info("[proxy:%s] _server_reader_loop exited: reason='%s' tcp_pkts=%d ws_sends=%d",
                          username, exit_reason, self._tcp_pkt_count, self._ws_send_count)
             if not self._stopped:
