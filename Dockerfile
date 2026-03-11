@@ -20,13 +20,20 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
         libcurl4-openssl-dev libjansson-dev libicu-dev liblzma-dev \
         libzstd-dev libsqlite3-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
-COPY freeciv/ /build/freeciv/
+
+# FREECIV_SHA pins the exact xbworld-3.4 commit to compile.
+# Changing this ARG busts the Docker layer cache so only C-source changes
+# (not documentation commits like PATCHES.md) trigger a rebuild.
+ARG FREECIV_SHA=8b3b51efbb9df7b86eaada0ba7d0f69a2ec144ae
+
+# Copy only the meson project definition file (not the C source tree).
+COPY freeciv/freeciv-web.fcproj /build/freeciv/
+
 WORKDIR /build/freeciv
-RUN if [ ! -f freeciv/meson.build ]; then \
-        rm -rf freeciv && \
-        git clone --depth 1 --branch xbworld-3.4 \
-            https://github.com/xingbo778/freeciv.git freeciv; \
-    fi
+# Clone branch tip; echo SHA so Docker cache is invalidated when FREECIV_SHA changes.
+RUN git clone --depth 1 --branch xbworld-3.4 \
+        https://github.com/xingbo778/freeciv.git freeciv && \
+    echo "Building freeciv SHA=${FREECIV_SHA} (branch tip: $(git -C freeciv rev-parse HEAD))"
 RUN meson setup build freeciv -Dserver='freeciv-web' \
         -Dclients=[] -Dfcmp=cli -Djson-protocol=true -Dnls=false \
         -Daudio=none -Dtools=manual \
