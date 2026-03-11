@@ -34,24 +34,32 @@ PID_PROCESSING_STARTED = 0
 PID_PROCESSING_FINISHED = 1
 PID_MAP_INFO = 17
 PID_TILE_INFO = 15
+PID_CITY_INFO = 31
+PID_CITY_REMOVE = 30
+PID_PLAYER_INFO = 51
+PID_PLAYER_REMOVE = 50
 
-_tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, locked}
+_tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, cities, locked}
+
+# Per-port player registry used to pick an AI player for the /take command.
+# Keyed by (server_port, playerno); value is {"name": str, "ai": bool}.
+_player_cache: dict[int, dict[int, dict]] = {}
 
 
 def _cache_feed_raw(server_port: int, pid: int, packet_json: str) -> None:
     """Store a MAP_INFO or TILE_INFO packet in the tile cache."""
     cache = _tile_cache.get(server_port)
     if cache and cache.get("locked"):
-        return  # cache is complete — don't overwrite with stale updates
+        return  # tile cache is complete — don't overwrite with stale tile/map updates
     if pid == PID_MAP_INFO:
         if cache is None:
-            cache = {"map_info": None, "tiles": [], "locked": False}
+            cache = {"map_info": None, "tiles": [], "cities": {}, "locked": False}
             _tile_cache[server_port] = cache
         cache["map_info"] = packet_json
         logger.info("[tile-cache:%d] cached MAP_INFO", server_port)
     elif pid == PID_TILE_INFO:
         if cache is None:
-            cache = {"map_info": None, "tiles": [], "locked": False}
+            cache = {"map_info": None, "tiles": [], "cities": {}, "locked": False}
             _tile_cache[server_port] = cache
         cache["tiles"].append(packet_json)
         if len(cache["tiles"]) % 500 == 0:
@@ -59,20 +67,85 @@ def _cache_feed_raw(server_port: int, pid: int, packet_json: str) -> None:
                         server_port, len(cache["tiles"]))
 
 
+def _cache_feed_city(server_port: int, city_id: int, packet_json: str) -> None:
+    """Update a city in the game-state cache.
+
+    City data is NOT locked — it is always kept current so that a late-joining
+    observer receives an up-to-date city snapshot even after the tile cache has
+    been locked.  Each city is stored by its integer ID so updates overwrite
+    stale entries without growing unboundedly.
+    """
+    cache = _tile_cache.get(server_port)
+    if cache is None:
+        cache = {"map_info": None, "tiles": [], "cities": {}, "locked": False}
+        _tile_cache[server_port] = cache
+    cache.setdefault("cities", {})[city_id] = packet_json
+
+
+def _cache_remove_city(server_port: int, city_id: int) -> None:
+    """Remove a city from the cache when it is destroyed."""
+    cache = _tile_cache.get(server_port)
+    if cache:
+        cache.get("cities", {}).pop(city_id, None)
+
+
+def _cache_feed_player(server_port: int, playerno: int, name: str, ai_control: bool) -> None:
+    """Store or update a player entry in the per-port player registry."""
+    if server_port not in _player_cache:
+        _player_cache[server_port] = {}
+    _player_cache[server_port][playerno] = {"name": name, "ai": ai_control}
+
+
+def _cache_remove_player(server_port: int, playerno: int) -> None:
+    """Remove a player from the registry (slot removed or disconnected)."""
+    _player_cache.get(server_port, {}).pop(playerno, None)
+
+
+def _cache_get_ai_player_name(server_port: int) -> Optional[str]:
+    """Return the name of the first AI player with a non-empty name.
+
+    Mirrors the browser JS logic in clientCore.ts::requestObserveGame:
+      1. prefer a player flagged ai_control=True
+      2. fall back to the first player with any non-empty name
+    Returns None when no suitable player is known yet.
+    """
+    players = _player_cache.get(server_port, {})
+    # Prefer an AI-controlled player (matches PLRF_AI flag check in the JS)
+    for entry in players.values():
+        if entry["ai"] and entry["name"]:
+            return entry["name"]
+    # Fallback: first player with a name (same fallback as JS)
+    for entry in players.values():
+        if entry["name"]:
+            return entry["name"]
+    return None
+
+
 def _cache_lock(server_port: int) -> None:
-    """Mark the cache as complete (no more tiles expected)."""
+    """Lock the tile portion of the cache (no more MAP_INFO / TILE_INFO updates).
+
+    City data continues to be updated after locking — only tiles are frozen.
+    """
     cache = _tile_cache.get(server_port)
     if cache and cache.get("map_info") and cache.get("tiles"):
         cache["locked"] = True
-        logger.info("[tile-cache:%d] locked (%d tiles)", server_port, len(cache["tiles"]))
+        logger.info("[tile-cache:%d] locked (%d tiles, %d cities so far)",
+                    server_port, len(cache["tiles"]), len(cache.get("cities", {})))
 
 
 def _cache_get_replay(server_port: int) -> Optional[str]:
-    """Return a WebSocket message containing cached MAP_INFO + TILE_INFO, or None."""
+    """Return a WebSocket message containing cached MAP_INFO + TILE_INFO + CITY_INFO, or None.
+
+    The city snapshot is taken at call time so it reflects the latest known
+    state; tiles are frozen at lock time.  Packet order mirrors what the server
+    sends during a normal initial state dump:
+        PROCESSING_STARTED → MAP_INFO → TILE_INFO* → CITY_INFO* → PROCESSING_FINISHED
+    """
     cache = _tile_cache.get(server_port)
     if not cache or not cache.get("map_info") or not cache.get("tiles"):
         return None
-    parts = ['{"pid":0}', cache["map_info"]] + cache["tiles"] + ['{"pid":1}']
+    city_packets = list(cache.get("cities", {}).values())
+    parts = ['{"pid":0}', cache["map_info"]] + cache["tiles"] + city_packets + ['{"pid":1}']
     return "[" + ",".join(parts) + "]"
 
 
@@ -100,6 +173,7 @@ class CivBridge:
         self._start_time = time.monotonic()
         self._tile_cache_injected = False  # whether we've replayed cached tiles
         self._processing_count = 0         # count of PROCESSING_FINISHED seen
+        self._take_sent = False            # whether we've sent /take to trigger city resync
 
     async def connect_to_server(self, login_packet: str) -> bool:
         logger.info("[proxy:%s] Connecting to civserver at 127.0.0.1:%d", self.username, self.server_port)
@@ -185,33 +259,69 @@ class CivBridge:
                     logger.error("[proxy:%s] UTF-8 decode error", self.username)
                     continue
 
-                # Parse pid once for caching and injection logic
+                # Parse pid (and city_id when needed) for caching and injection logic.
+                # We already paid the json.loads cost here, so we reuse the parsed
+                # object rather than parsing again in the cache helpers.
                 try:
-                    pid = json.loads(text).get("pid")
+                    parsed_pkt = json.loads(text)
+                    pid = parsed_pkt.get("pid")
                 except Exception:
+                    parsed_pkt = None
                     pid = None
 
-                # Feed MAP_INFO and TILE_INFO into tile cache
+                # Feed MAP_INFO and TILE_INFO into tile cache (locked after first batch)
                 if pid in (PID_MAP_INFO, PID_TILE_INFO):
                     _cache_feed_raw(self.server_port, pid, text)
+                # Feed CITY_INFO into city cache — always updated, never locked
+                elif pid == PID_CITY_INFO and parsed_pkt is not None:
+                    city_id = parsed_pkt.get("id")
+                    if city_id is not None:
+                        _cache_feed_city(self.server_port, city_id, text)
+                # Remove destroyed cities from cache
+                elif pid == PID_CITY_REMOVE and parsed_pkt is not None:
+                    city_id = parsed_pkt.get("city_id")
+                    if city_id is not None:
+                        _cache_remove_city(self.server_port, city_id)
+                # Track players so we can pick an AI player for /take
+                elif pid == PID_PLAYER_INFO and parsed_pkt is not None:
+                    pno = parsed_pkt.get("playerno")
+                    if pno is not None:
+                        _cache_feed_player(
+                            self.server_port,
+                            pno,
+                            parsed_pkt.get("name", ""),
+                            bool(parsed_pkt.get("ai_control", False)),
+                        )
+                elif pid == PID_PLAYER_REMOVE and parsed_pkt is not None:
+                    pno = parsed_pkt.get("playerno")
+                    if pno is not None:
+                        _cache_remove_player(self.server_port, pno)
 
                 self._send_buffer.append(text)
 
                 if pid == PID_PROCESSING_FINISHED:
                     self._processing_count += 1
-                    # Lock cache after the first processing batch that has tiles
+                    # Snapshot the locked flag BEFORE _cache_lock() may set it.
+                    # True  → tile cache was already populated by a previous connection
+                    #         → this connection is a late-joining observer.
+                    # False → this connection is the first one (host / game starter).
+                    was_already_locked = _tile_cache.get(self.server_port, {}).get("locked", False)
+                    # Lock the tile portion of the cache after the first full batch.
                     _cache_lock(self.server_port)
-                    # Inject cached tiles to this client on the FIRST processing_finished
+                    # Inject cached tiles+cities on the FIRST processing_finished.
                     if not self._tile_cache_injected:
                         replay = _cache_get_replay(self.server_port)
                         if replay:
                             self._tile_cache_injected = True
+                            _cache_snap = _tile_cache.get(self.server_port, {})
                             logger.info(
-                                "[proxy:%s] Injecting cached tile data (port=%d, tiles=%d)",
+                                "[proxy:%s] Injecting cached tile+city data "
+                                "(port=%d, tiles=%d, cities=%d)",
                                 self.username, self.server_port,
-                                len(_tile_cache.get(self.server_port, {}).get("tiles", []))
+                                len(_cache_snap.get("tiles", [])),
+                                len(_cache_snap.get("cities", {})),
                             )
-                            # Flush current buffer first, then inject
+                            # Flush current buffer first, then inject.
                             flush_ok = await self._flush_to_client()
                             if not flush_ok:
                                 break
@@ -222,6 +332,28 @@ class CivBridge:
                                 logger.error("[proxy:%s] Failed to send tile cache: %s", self.username, e)
                                 self._stopped = True
                                 break
+                            # For late-joining observers, proactively send /take <ai_player>
+                            # so freeciv-server immediately pushes fresh CITY_INFO packets.
+                            # This mirrors clientCore.ts::requestObserveGame but fires before
+                            # the browser's own 3-second delayed /take, giving the client
+                            # city data sooner.  The browser's subsequent /take is a no-op.
+                            if was_already_locked and not self._take_sent:
+                                ai_name = _cache_get_ai_player_name(self.server_port)
+                                if ai_name:
+                                    self._take_sent = True
+                                    take_pkt = json.dumps({"pid": 26, "message": f"/take {ai_name}"})
+                                    await self._send_to_server(take_pkt)
+                                    logger.info(
+                                        "[proxy:%s] Sent /take %s to trigger city resync "
+                                        "(port=%d)",
+                                        self.username, ai_name, self.server_port,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "[proxy:%s] Late observer but no AI player name cached yet "
+                                        "(port=%d) — skipping /take; browser JS will handle it",
+                                        self.username, self.server_port,
+                                    )
                             continue  # skip normal flush below (already flushed)
 
                 flush_ok = await self._flush_to_client()
