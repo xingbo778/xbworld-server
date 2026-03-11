@@ -56,9 +56,15 @@ _PID_RE = re.compile(r'"pid"\s*:\s*(-?\d+)')
 # "key":value (no spaces around colon, integer value, no string quoting).
 _CITY_ID_RE    = re.compile(r'"id"\s*:\s*(\d+)')
 _CITY_REM_RE   = re.compile(r'"city_id"\s*:\s*(\d+)')
+# Combined PLAYER_INFO extractor: one scan instead of three separate re.search()
+# calls.  Named groups let us identify which field each match captured.
+_PLAYER_ALL_RE = re.compile(
+    r'"playerno"\s*:\s*(?P<no>\d+)'
+    r'|"name"\s*:\s*"(?P<name>[^"]*)"'
+    r'|"ai_control"\s*:\s*(?P<ai>true|false|1|0)'
+)
+# Still needed for PLAYER_REMOVE (only needs playerno):
 _PLAYER_NO_RE  = re.compile(r'"playerno"\s*:\s*(\d+)')
-_PLAYER_NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
-_PLAYER_AI_RE  = re.compile(r'"ai_control"\s*:\s*(true|false|1|0)')
 
 _tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, cities, locked, tiles_prefix}
 
@@ -373,18 +379,23 @@ class CivBridge:
                         _m = _CITY_REM_RE.search(text)
                         if _m:
                             _cache_remove_city(server_port, int(_m.group(1)))
-                    # Track players so we can pick an AI player for /take
+                    # Track players so we can pick an AI player for /take.
+                    # Single finditer scan extracts playerno, name, ai_control
+                    # in one pass instead of three separate re.search() calls.
                     elif pid == PID_PLAYER_INFO:
-                        _m_no = _PLAYER_NO_RE.search(text)
-                        if _m_no:
-                            _m_name = _PLAYER_NAME_RE.search(text)
-                            _m_ai   = _PLAYER_AI_RE.search(text)
-                            _cache_feed_player(
-                                server_port,
-                                int(_m_no.group(1)),
-                                _m_name.group(1) if _m_name else "",
-                                _m_ai.group(1) in ("true", "1") if _m_ai else False,
-                            )
+                        _p_no: int | None = None
+                        _p_name = ""
+                        _p_ai = False
+                        for _pm in _PLAYER_ALL_RE.finditer(text):
+                            lg = _pm.lastgroup
+                            if lg == 'no':
+                                _p_no = int(_pm.group('no'))
+                            elif lg == 'name':
+                                _p_name = _pm.group('name')
+                            else:
+                                _p_ai = _pm.group('ai') in ('true', '1')
+                        if _p_no is not None:
+                            _cache_feed_player(server_port, _p_no, _p_name, _p_ai)
                     elif pid == PID_PLAYER_REMOVE:
                         _m = _PLAYER_NO_RE.search(text)
                         if _m:
