@@ -356,9 +356,9 @@ class CivBridge:
                     pid = int(_m.group(1)) if _m else None
 
                 # Feed MAP_INFO and TILE_INFO into tile cache (locked after first batch).
-                # Skip the call once _tile_cache_locked is set to avoid a function
-                # call + dict lookup on every tile packet for late-joining observers.
-                if (pid == PID_MAP_INFO or pid == PID_TILE_INFO) and not _tile_cache_locked:
+                # _tile_cache_locked check is first so that after locking it short-circuits
+                # without evaluating the pid comparisons on every subsequent packet.
+                if not _tile_cache_locked and (pid == PID_MAP_INFO or pid == PID_TILE_INFO):
                     _cache_feed_raw(server_port, pid, text)
                 elif pid in _PIDS_NEEDING_EXTRACT:
                     # Use targeted regex extractors instead of full json.loads.
@@ -461,7 +461,7 @@ class CivBridge:
                 #   reducing 5000+ individual frames to 1 during tile sync.
                 # - All other packets (and TILE_INFO after lock): flush immediately for
                 #   low latency during normal gameplay.
-                if pid == PID_TILE_INFO and not _tile_cache_locked:
+                if not _tile_cache_locked and pid == PID_TILE_INFO:
                     continue  # accumulate; flushed at PROCESSING_FINISHED
 
                 flush_ok = await self._flush_to_client()
