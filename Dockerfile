@@ -39,6 +39,7 @@ RUN meson setup build freeciv \
         -Dnls=false \
         -Daudio=none \
         -Dtools=manual \
+        -Daimodules=stub \
         -Dproject-definition=../freeciv-web.fcproj \
         -Ddefault_library=static \
         -Dprefix=/opt/freeciv \
