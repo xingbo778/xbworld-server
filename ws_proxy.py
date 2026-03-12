@@ -68,7 +68,7 @@ _PLAYER_NO_RE  = re.compile(r'"playerno"\s*:\s*(\d+)')
 
 _tile_cache: dict[int, dict] = {}  # server_port -> {map_info, tiles, cities, locked, tiles_prefix}
 
-_USERNAME_RE = re.compile(r"[a-z][a-z0-9]*")
+_USERNAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 
 # Per-port player registry used to pick an AI player for the /take command.
 # Keyed by (server_port, playerno); value is {"name": str, "ai": bool}.
@@ -375,7 +375,7 @@ class CivBridge:
                 # without evaluating the pid comparisons on every subsequent packet.
                 if not _tile_cache_locked and (pid == PID_MAP_INFO or pid == PID_TILE_INFO):
                     _cache_feed_raw(server_port, pid, text)
-                elif pid is not None and _PIDS_NEEDING_EXTRACT[pid]:
+                elif pid is not None and pid < 256 and _PIDS_NEEDING_EXTRACT[pid]:
                     # Use targeted regex extractors instead of full json.loads.
                     # Feed CITY_INFO into city cache — always updated, never locked
                     if pid == PID_CITY_INFO:
