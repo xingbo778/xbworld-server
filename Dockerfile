@@ -23,7 +23,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project definition file (small, stable layer cache)
-COPY freeciv/freeciv-web.fcproj /build/freeciv-web.fcproj
+COPY freeciv/freeciv-web.fcproj /build/freeciv/freeciv-web.fcproj
 
 # Clone freeciv source code from GitHub (deterministic, cacheable)
 # Using --branch xbworld-3.4 to get the specific version
