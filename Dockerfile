@@ -23,7 +23,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project definition file (small, stable layer cache)
-COPY freeciv/freeciv-web.fcproj /build/freeciv/freeciv-web.fcproj
+COPY freeciv/freeciv-web.fcproj /build/freeciv-web.fcproj
 
 # Clone freeciv source code from GitHub (deterministic, cacheable)
 # Using --branch xbworld-3.4 to get the specific version
@@ -39,7 +39,7 @@ RUN meson setup build freeciv \
         -Dnls=false \
         -Daudio=none \
         -Dtools=manual \
-        -Dproject-definition=freeciv-web.fcproj \
+        -Dproject-definition=../freeciv-web.fcproj \
         -Ddefault_library=static \
         -Dprefix=/opt/freeciv \
         -Doptimization=3 && \
@@ -64,6 +64,7 @@ COPY static/ /app/static/
 COPY data/ /app/data/
 
 WORKDIR /app
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN useradd -m -s /bin/bash xbworld && \
@@ -74,6 +75,7 @@ ENV FREECIV_BIN=/opt/freeciv/bin/freeciv-web \
     PYTHONUNBUFFERED=1
 
 USER xbworld
+
 EXPOSE 8080
 
 CMD ["python3", "server.py", "--host", "0.0.0.0"]
