@@ -338,6 +338,12 @@ async def api_servers():
     return server_mgr.status()
 
 
+@app.get("/admin/servers")
+async def admin_servers():
+    """Admin panel: list active game servers."""
+    return server_mgr.status()
+
+
 @app.post("/game/restart")
 async def api_game_restart():
     """Kill all running games and start a fresh singleplayer game.
